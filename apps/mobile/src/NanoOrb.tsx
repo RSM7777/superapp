@@ -6,7 +6,8 @@
 // happens right here in the same conversation — no screen switch.
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Animated, Easing, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
+  Animated, Easing, Keyboard, Platform, Pressable, ScrollView, StyleSheet,
+  Text, TextInput, View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
@@ -60,6 +61,7 @@ export function NanoOrb({
   contextOpen?: { seq: number; ctx: DockContext } | null;
 }) {
   const insets = useSafeAreaInsets();
+  const [kb, setKb] = useState(0);
   const [open, setOpen] = useState(false);
   const [phase, setPhase] = useState<OrbPhase>("idle");
   const [transcript, setTranscript] = useState("");
@@ -113,6 +115,16 @@ export function NanoOrb({
   // speaking" cause on iOS.)
   useEffect(() => {
     setAudioModeAsync({ playsInSilentMode: true }).catch(() => {});
+  }, []);
+
+  // Lift the dock above the keyboard when typing, so the caption/input never
+  // hides behind it.
+  useEffect(() => {
+    const showEvt = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvt = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const s1 = Keyboard.addListener(showEvt, (e) => setKb(e.endCoordinates?.height ?? 0));
+    const s2 = Keyboard.addListener(hideEvt, () => setKb(0));
+    return () => { s1.remove(); s2.remove(); };
   }, []);
 
   useEffect(() => {
@@ -587,8 +599,8 @@ export function NanoOrb({
           `${ctx.label} comes straight to you from now on. I won't draft for them again.`,
           ctx.fromAddr ? { path: "/v1/inbox/mute", body: { sender: ctx.fromAddr } } : null, true) },
         ...(ctx.kind ? [{ key: "auto", label: "Auto-reply to these next time", run: () => ctxAct(
-          "Done. I answer this kind myself from now on, signed as mine, and it lands under Worth knowing.",
-          { path: "/v1/inbox/autoreply", body: { kind: ctx.kind } }) }] : []),
+          "Sent, and I'll answer this kind myself from now on, signed as you, landing under Worth knowing.",
+          { path: "/v1/inbox/autoreply", body: { kind: ctx.kind } }, true) }] : []),
         ...(ctx.draftId ? [{ key: "hold", label: "Hold it until 6pm", run: () => ctxAct(
           "Held. I raise it once at 6pm and once tomorrow morning, then it's yours.",
           { path: `/v1/inbox/drafts/${ctx.draftId}/defer`,
@@ -633,7 +645,10 @@ export function NanoOrb({
   return (
     <>
     {stage ? (
-      <View style={[o.vdock, { paddingBottom: 14 + Math.max(insets.bottom - 8, 0) }]}>
+      <View style={[o.vdock, {
+        bottom: kb > 0 ? kb + 8 : 24,
+        paddingBottom: kb > 0 ? 14 : 14 + Math.max(insets.bottom - 8, 0),
+      }]}>
         <View style={o.vdockHead}>
           <View style={o.waveRow}>
             {[10, 16, 8, 14, 11, 17, 9].map((h, i) => (

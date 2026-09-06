@@ -385,6 +385,68 @@ def set_auto_reply(db: Session, user_id: str, *, kind: str | None = None,
     return value
 
 
+def send_matching_pending_drafts(db: Session, user_id: str, *,
+                                 kind: str | None = None,
+                                 sender: str | None = None) -> int:
+    """Turning on auto-reply for a kind or sender also clears what's already
+    waiting: send the pending drafts that match, right now. Same gates as the
+    background auto-sender (scope tier, suspicious skip, exfiltration guard)."""
+    settings = get_settings()
+    if settings.gmail_scope_tier not in ("send", "modify"):
+        return 0
+    from sqlalchemy import select as _select
+
+    from ..kernel import record_decision
+    from ..llm.provider import LLMProvider
+    from ..models import InboxDraft, InboxMessage, utcnow
+    from ..people import update_person
+    from ..policy import assess, draft_leaks_new_destination
+
+    kind_l = (kind or "").strip().lower()
+    sender_l = (sender or "").strip().lower()
+    if not kind_l and not sender_l:
+        return 0
+    sent = 0
+    drafts = list(db.scalars(_select(InboxDraft).where(
+        InboxDraft.user_id == user_id,
+        InboxDraft.status.in_(("waiting", "edited")))))
+    for d in drafts:
+        msg = db.get(InboxMessage, d.message_id)
+        if msg is None or msg.tier != "needs_reply" or msg.settled:
+            continue
+        nk = (getattr(msg, "note_kind", "") or "").lower()
+        addr = (msg.from_addr or "").lower()
+        if not ((kind_l and nk == kind_l) or (sender_l and addr == sender_l)):
+            continue
+        if getattr(msg, "suspicious", False):
+            continue  # a steering email never auto-sends, even on an explicit rule
+        if not assess("inbox.auto_reply", provenance="user").allowed:
+            continue
+        if draft_leaks_new_destination(d.body, msg.body_text or "",
+                                       allowed=f"{msg.from_addr} {msg.account_email}"):
+            continue
+        token = get_token(db, user_id=user_id, provider=f"gmail:{msg.account_email}")
+        client = GmailClient(json.loads(token) if token else None)
+        try:
+            sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
+                                        body=d.body, thread_id=msg.thread_id)
+        except Exception:  # noqa: BLE001
+            continue
+        d.status = "sent"
+        d.sent_at = utcnow()
+        msg.tier = "worth_knowing"
+        append_event(db, user_id=user_id, type="draft_sent", agent="inbox", domain="inbox",
+                     payload={"draft_id": d.id, "gmail_sent_id": sent_id,
+                              "auto": True, "kind": nk, "on_enable": True})
+        update_person(db, LLMProvider(), user_id, email=msg.from_addr, name=msg.from_name,
+                      direction="user_wrote", subject=msg.subject, body=d.body[:4000])
+        record_decision(db, user_id=user_id, agent="inbox", action_key="inbox.auto_reply",
+                        decided_by="user", verdict="accepted",
+                        payload={"draft_id": d.id, "kind": nk})
+        sent += 1
+    return sent
+
+
 def _autoreply_fact(db: Session, user_id: str):
     from sqlalchemy import select as _select
 
@@ -402,11 +464,13 @@ def add_autoreply(body: AutoReplyBody, user_id: str = Depends(current_user_id),
     if not body.kind and not body.sender:
         raise HTTPException(status_code=422, detail="kind or sender required")
     value = set_auto_reply(db, user_id, kind=body.kind, sender=body.sender)
+    sent_now = send_matching_pending_drafts(db, user_id, kind=body.kind, sender=body.sender)
     append_event(db, user_id=user_id, type="autoreply_enabled", agent="inbox",
-                 domain="inbox", payload={"kind": body.kind or "", "sender": body.sender or ""})
+                 domain="inbox", payload={"kind": body.kind or "", "sender": body.sender or "",
+                                          "sent_now": sent_now})
     db.commit()
     return {"ok": True, "kinds": list(value.get("kinds", {})),
-            "senders": list(value.get("senders", {}))}
+            "senders": list(value.get("senders", {})), "sent_now": sent_now}
 
 
 @router.delete("/inbox/autoreply")

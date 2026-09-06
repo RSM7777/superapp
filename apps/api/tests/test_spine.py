@@ -1410,3 +1410,43 @@ def test_sender_scoped_autoreply_and_chat_rule():
     st = client.get("/v1/inbox/state", headers=AUTH).json()
     assert "boss@example.com" not in st.get("auto_reply_senders", [])
 
+
+def test_enabling_autoreply_sends_the_waiting_draft():
+    """'Auto-reply to these' clears what's already written: turning on the
+    rule for a kind sends the pending draft that matches, right now."""
+    import superapp.config as config_module
+
+    from superapp.models import InboxMessage, utcnow
+    from superapp.substrate.inbox import create_draft
+
+    settings = config_module.get_settings()
+    prev = settings.gmail_scope_tier
+    settings.gmail_scope_tier = "send"
+    try:
+        db = SessionLocal()
+        m = InboxMessage(user_id="harshith", account_email="h@x.com",
+                         gmail_msg_id="ar-wait-1", thread_id="t-ar-wait",
+                         from_name="Recruiter Rita", from_addr="rita@firm.example",
+                         subject="quick call?", body_text="Are you free Tuesday?",
+                         tier="needs_reply", note_kind="recruiter pings",
+                         received_at=utcnow())
+        db.add(m)
+        db.flush()
+        d = create_draft(db, user_id="harshith", message_id=m.id,
+                         body="Thanks Rita, not looking right now.")
+        db.commit()
+        mid, did = m.id, d.id
+        db.close()
+
+        r = client.post("/v1/inbox/autoreply", headers=AUTH,
+                        json={"kind": "recruiter pings"}).json()
+        assert r["sent_now"] >= 1
+
+        from superapp.models import InboxDraft
+        db = SessionLocal()
+        assert db.get(InboxDraft, did).status == "sent"
+        assert db.get(InboxMessage, mid).tier == "worth_knowing"
+        db.close()
+    finally:
+        settings.gmail_scope_tier = prev
+
