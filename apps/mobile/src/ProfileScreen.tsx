@@ -3,6 +3,7 @@
 // what it's learned about you). A page, matched to Nano V1 (8).
 import { LinearGradient } from "expo-linear-gradient";
 import Constants from "expo-constants";
+import * as Application from "expo-application";
 import * as WebBrowser from "expo-web-browser";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -41,6 +42,8 @@ export function ProfileScreen({
   const [reauth, setReauth] = useState(false);
   const [autoKinds, setAutoKinds] = useState<string[]>([]);
   const [autoSenders, setAutoSenders] = useState<string[]>([]);
+  const [prioKinds, setPrioKinds] = useState<string[]>([]);
+  const [prioSenders, setPrioSenders] = useState<string[]>([]);
   const [knows, setKnows] = useState<Knows | null>(null);
   const [facet, setFacet] = useState("People");
   const [linking, setLinking] = useState(false);
@@ -59,6 +62,8 @@ export function ProfileScreen({
         setReauth(!!d.reauth?.needed);
         setAutoKinds(d.auto_reply_kinds ?? []);
         setAutoSenders(d.auto_reply_senders ?? []);
+        setPrioKinds(d.priority_kinds ?? []);
+        setPrioSenders(d.priority_senders ?? []);
       }
       if (kRes.ok) setKnows(await kRes.json());
     } catch { /* quiet */ }
@@ -88,6 +93,19 @@ export function ProfileScreen({
     }
   }, [apiUrl, auth, linking, refresh, onChanged]);
 
+  // "Never miss" is a standing promise; this is the only place it can be
+  // taken back by hand (voice: "stop flagging X").
+  const stopPrio = useCallback(async (body: { kind?: string; sender?: string }) => {
+    try {
+      await fetch(`${apiUrl}/v1/inbox/priority`, {
+        method: "DELETE", headers: { ...auth, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      await refresh();
+      onChanged?.();
+    } catch { /* quiet */ }
+  }, [apiUrl, auth, refresh, onChanged]);
+
   const stopAuto = useCallback(async (body: { kind?: string; sender?: string }) => {
     setAutoKinds((k) => k.filter((x) => x !== body.kind));
     setAutoSenders((k) => k.filter((x) => x !== body.sender));
@@ -101,6 +119,7 @@ export function ProfileScreen({
   }, [apiUrl, auth, onChanged]);
 
   const autoOn = autoKinds.length + autoSenders.length;
+  const prioOn = prioKinds.length + prioSenders.length;
   const rows: { name: string; sub: string }[] =
     facet === "People"
       ? (knows?.people ?? []).map((p) => ({
@@ -201,6 +220,43 @@ export function ProfileScreen({
         </View>
       ) : null}
 
+      {/* Never miss */}
+      <View style={s.sectionRow}>
+        <Text style={s.sectionTitle}>Never miss</Text>
+        <Text style={[s.count, { color: prioOn ? C.lav : C.muted }]}>{prioOn || "none"}</Text>
+      </View>
+      <Text style={s.sectionSub}>
+        {prioOn
+          ? "Senders and kinds I always put in Needs you, with a reply drafted, however I'd otherwise file them."
+          : "Say \u201cdon\u2019t let me miss anything from\u2026\u201d and it lands here."}
+      </Text>
+      {prioOn ? (
+        <View style={s.panel}>
+          {prioSenders.map((a, i) => (
+            <View key={"ps" + a} style={[s.autoRow, i > 0 && s.divider]}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={s.autoName} numberOfLines={1}>{a}</Text>
+                <Text style={s.autoMeta}>{a.includes("@") ? "this person" : "everyone at this domain"}</Text>
+              </View>
+              <Pressable onPress={() => stopPrio({ sender: a })} hitSlop={8}>
+                <Text style={[s.chip, { color: C.rose }]}>DROP</Text>
+              </Pressable>
+            </View>
+          ))}
+          {prioKinds.map((k, i) => (
+            <View key={"pk" + k} style={[s.autoRow, (prioSenders.length + i) > 0 && s.divider]}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={s.autoName}>{k}</Text>
+                <Text style={s.autoMeta}>this kind of email</Text>
+              </View>
+              <Pressable onPress={() => stopPrio({ kind: k })} hitSlop={8}>
+                <Text style={[s.chip, { color: C.rose }]}>DROP</Text>
+              </Pressable>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
       {/* What Nano knows */}
       <View style={s.sectionRow}>
         <Text style={s.sectionTitle}>What Nano knows</Text>
@@ -238,7 +294,10 @@ export function ProfileScreen({
         <Text style={s.signOutText}>Sign out</Text>
       </Pressable>
 
-      <Text style={s.version}>Nano {Constants.expoConfig?.version ?? ""}</Text>
+      <Text style={s.version}>
+        Nano {Application.nativeApplicationVersion ?? Constants.expoConfig?.version ?? ""}
+        {Application.nativeBuildVersion ? ` (${Application.nativeBuildVersion})` : ""}
+      </Text>
     </ScrollView>
   );
 }

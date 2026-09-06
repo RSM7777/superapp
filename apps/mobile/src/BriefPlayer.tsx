@@ -206,7 +206,7 @@ export function BriefPlayer({
       }
       if (r.action === "open_screen" || r.action === "refresh_inbox") { onClose(); onOpenInbox(); return; }
       if (r.action === "end_conversation") { onClose(); return; }
-      setSpoken({ text: reply || "Say that once more?", id: `ans-${chatHist.current.length}`, isAnswer: true });
+      setSpoken({ text: reply || "Say that once more?", id: `ans-${Date.now()}`, isAnswer: true });
     } catch {
       // Offline or stubbed: the brief still has to be steerable, so fall back
       // to the crudest reading of the words. Never the primary path.
@@ -229,21 +229,43 @@ export function BriefPlayer({
     // ...but never let the echo guard eat a real question. Nano narrates in
     // statements; the person asks. A question that happens to reuse Nano's
     // words ("anything else from Marcus?") is not an echo.
+    // Nano's own narration also starts with those words ("What needs you
+    // today..."), so a near-total overlap is still an echo however it opens.
     const asking = t.endsWith("?") || /^(who|what|when|where|why|how|which|whose|do|does|did|can|could|would|should|is|are|was|were|any|anything|tell|read|remind|give)\b/.test(t);
-    const words = t.split(/\s+/).filter(Boolean);
-    if (!asking && words.length >= 3) {
-      const said = new Set(lastSpokenRef.current.split(/\s+/));
+    // Compare bare words: Nano's line keeps its punctuation ("dinner,")
+    // while the transcript has none, and that gap used to undercount echoes.
+    const bareWord = (w: string) => w.replace(/[^a-z0-9']/g, "");
+    const words = t.split(/\s+/).map(bareWord).filter(Boolean);
+    if (words.length >= 3) {
+      // A phrase Nano QUOTED as something to say back ("say \"stop flagging
+      // amazon.com\"") is an invitation, not an echo: drop quoted spans from
+      // the vocabulary so the person can actually say it.
+      const unquoted = lastSpokenRef.current.replace(/"[^"]*"|\u201c[^\u201d]*\u201d/g, " ");
+      const said = new Set(unquoted.split(/\s+/).map(bareWord).filter(Boolean));
       const overlap = words.filter((w) => said.has(w)).length / words.length;
-      if (overlap > 0.6) { startListening(); return; }
+      if (overlap > 0.85 || (!asking && overlap > 0.6)) { startListening(); return; }
     }
     stopListening();
-    // Everything goes to Nano. There is no client-side command vocabulary:
-    // "go next", "what else", "skip this bit", "don't show me Amazon updates"
-    // and "what was the update on the lease" are all just things a person
-    // said, and the brain decides what they meant. The only local shortcuts
-    // left are the offline fallback inside converse().
+    // A bare one-word steer is unambiguous and must feel instant: "next"
+    // should not wait on a server round-trip. Only the WHOLE utterance
+    // counts — "show me more about that email" is a sentence and goes to
+    // Nano, so this cannot misfire the way word-anywhere matching did.
+    const bare = t.replace(/[.,!?]+$/, "").trim();
+    if (/^(next|skip|next one|move on|go on|keep going|continue|carry on)$/.test(bare)) return next();
+    if (/^(back|go back|previous|last one)$/.test(bare)) return prev();
+    if (/^(repeat|again|say that again|one more time|repeat that)$/.test(bare) && seg) {
+      setSpoken({ text: seg.say, id: `seg-${idx}-r${Date.now()}`, isAnswer: false });
+      return;
+    }
+    if (/^(stop|close|done|quit|exit|that'?s all|i'?m good|dismiss)$/.test(bare)) return onClose();
+    // Everything else goes to Nano. There is no client-side command
+    // vocabulary for sentences: "go next please", "what else", "skip this
+    // bit", "don't show me Amazon updates" and "what was the update on the
+    // lease" are all just things a person said, and the brain decides what
+    // they meant. The only other local shortcuts are the offline fallback
+    // inside converse().
     converse(text);
-  }, [converse, startListening, stopListening]);
+  }, [converse, startListening, stopListening, next, prev, seg, idx, onClose]);
 
   useEffect(() => { handleRef.current = handleUtterance; }, [handleUtterance]);
 
@@ -407,8 +429,8 @@ export function BriefPlayer({
 
         {seg.mailRows?.length ? (
           <View style={{ gap: 8, marginTop: 11 }}>
-            {seg.mailRows.map((r) => (
-              <View key={r.from} style={s.mailRow}>
+            {seg.mailRows.map((r, i) => (
+              <View key={`${i}-${r.from}`} style={s.mailRow}>
                 <LinearGradient colors={["#818CF8", "#4338CA"]}
                                 start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.mailAvatar}>
                   <Text style={s.mailAvatarText}>{r.initials}</Text>
@@ -425,8 +447,8 @@ export function BriefPlayer({
 
         {seg.noteRows ? (
           <View style={{ gap: 8, marginTop: 20 }}>
-            {seg.noteRows.map((n) => (
-              <View key={n.from + n.gist.slice(0, 8)} style={s.noteRow}>
+            {seg.noteRows.map((n, i) => (
+              <View key={`${i}-${n.from}`} style={s.noteRow}>
                 <View style={s.noteDot} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={s.noteFrom}>{n.from}</Text>
@@ -439,8 +461,8 @@ export function BriefPlayer({
 
         {seg.ledger ? (
           <View style={{ gap: 8, marginTop: 20 }}>
-            {seg.ledger.map((l) => (
-              <View key={l.text} style={s.ledgerRow}>
+            {seg.ledger.map((l, i) => (
+              <View key={`${i}-${l.text}`} style={s.ledgerRow}>
                 <LinearGradient colors={["#818CF8", "#4338CA"]}
                                 start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={s.ledgerTile}>
                   <Text style={s.ledgerTileText}>I</Text>

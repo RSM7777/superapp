@@ -364,6 +364,9 @@ class InboxMessage(Base):
     clear_reason: Mapped[str] = mapped_column(String(128), default="")
     note_kind: Mapped[str] = mapped_column(String(120), default="")
     suspicious: Mapped[bool] = mapped_column(Boolean, default=False)
+    # A "never miss" rule put this in needs_reply; the model saw no ask, so
+    # no auto-reply path may answer it on its own.
+    rule_promoted: Mapped[bool] = mapped_column(Boolean, default=False)
     verified_clear: Mapped[bool] = mapped_column(default=False)  # adversarial pass agreed
     archived: Mapped[bool] = mapped_column(default=False)  # actually archived in Gmail
     settled: Mapped[bool] = mapped_column(default=False)  # user resolved it (sent/dismissed)

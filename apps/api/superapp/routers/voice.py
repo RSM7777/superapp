@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ..auth import current_user_id
@@ -50,16 +50,23 @@ CONVERSE_SYSTEM = (
     "action=none and listen=true; do NOT skip ahead just because they spoke.\n"
     "NEVER MISS: \"I don't want to miss anything from X\", \"always show me "
     "Y\", \"flag anything from Z\", \"put those in Needs you\" is a standing "
-    "promise: action=priority_mail. Prefer priority_sender as a bare DOMAIN "
-    "(\"amazon.com\") — it catches every address they send from. NEVER invent "
-    "a specific address like support@amazon.com; a guessed address looks "
-    "precise and then silently never matches. Use priority_kind only when "
-    "they describe a stream rather than a sender. Read the rule back in one "
-    "line so a wrong guess is caught now, not in three weeks.\n"
+    "promise: action=priority_mail. For a COMPANY or service, priority_sender "
+    "is its bare domain (\"amazon.com\"): it catches every address they send "
+    "from. For a PERSON it is their exact address, copied from `from_addr` in "
+    "the inbox context or from `people`; never a bare gmail.com, outlook.com "
+    "or yahoo.com, which would flag every stranger on that provider. NEVER "
+    "invent an address; if you do not have it, ask. priority_kind must be "
+    "copied VERBATIM from an item's `kind` in the inbox context (those are "
+    "the labels I file by); if no item carries the kind they mean, ask which "
+    "email they mean. To drop a rule (\"stop flagging X\", \"you can let "
+    "Amazon go again\"): action=priority_mail with the same fields and "
+    "subject=\"off\". Read the rule back in one line so a wrong guess is "
+    "caught now, not in three weeks.\n"
     "STANDING RULES: \"don't show me X\", \"stop bringing me Y\", \"I never "
-    "want mail from Z\" is a durable filter, not a one-off: "
-    "action=mute_mail with mute_kind (a description like \"Amazon shipping "
-    "updates\") or mute_sender (an address). Confirm it out loud in one line.\n"
+    "want mail from Z\" is a durable filter, not a one-off: action=mute_mail "
+    "with mute_kind (copied VERBATIM from an item's `kind`) or mute_sender "
+    "(an exact address from `from_addr`, or a company's bare domain). Confirm "
+    "it out loud in one line.\n"
     "FOCUS: when `focus` is present it is what they are looking at and "
     "hearing right now — the briefing segment being read and the mail on "
     "screen. Resolve every vague reference against it first: \"that email\", "
@@ -204,6 +211,14 @@ class ConverseBody(BaseModel):
     # against this instead of guessing at the whole inbox.
     focus: dict | None = None
 
+    @field_validator("focus")
+    @classmethod
+    def _focus_fits(cls, v):
+        # Client-supplied and dumped verbatim into the prompt: keep it a slice.
+        if v is not None and len(json.dumps(v, default=str)) > 6000:
+            raise ValueError("focus too large")
+        return v
+
 
 def _playbooks(db, user_id: str) -> list[dict]:
     """Distilled procedures from the nightly dream: how Nano has learned to
@@ -258,7 +273,8 @@ def _inbox_for_voice(context) -> dict:
     inbox = context.domain_data.get("inbox", {})
     return {
         "needs_reply": [{
-            "message_id": a["id"], "from": a["from_name"], "subject": a["subject"],
+            "message_id": a["id"], "from": a["from_name"], "from_addr": a.get("from_addr", ""),
+            "subject": a["subject"], "kind": a.get("kind", ""),
             "what_they_want": a["why_now"] or a["gist"],
             "body_excerpt": (a.get("body") or "")[:400],
             "draft_id": (a.get("draft") or {}).get("id"),
@@ -266,7 +282,8 @@ def _inbox_for_voice(context) -> dict:
             "deferred": (a.get("draft") or {}).get("deferred", False),
         } for a in inbox.get("needs_reply", [])[:6]],
         "worth_knowing": [{
-            "from": r["from_name"], "gist": r["gist"] or r["subject"],
+            "from": r["from_name"], "from_addr": r.get("from_addr", ""),
+            "kind": r.get("kind", ""), "gist": r["gist"] or r["subject"],
         } for r in inbox.get("worth_knowing", [])[:6]],
         "cleared_count": inbox.get("cleared_count", 0),
         "recently_sent": [{
@@ -358,38 +375,53 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
         return {}
     if action == "priority_mail":
         # "Never let me miss X." Stored as a standing rule and enforced in
-        # triage, so it cannot be quietly forgotten on a later run.
+        # triage, so it cannot be quietly forgotten on a later run. The same
+        # action with subject="off" drops the rule again.
+        from fastapi import HTTPException as _HTTPExc
+
         from ..routers.inbox import PriorityBody
         from ..routers.inbox import priority as _priority
-        kind = (parsed.get("priority_kind") or "").strip()
-        sender = (parsed.get("priority_sender") or "").strip()
+        from ..routers.inbox import unpriority as _unpriority
+        kind = (parsed.get("priority_kind") or "").strip()[:120]
+        sender = (parsed.get("priority_sender") or "").strip()[:320]
+        off = (parsed.get("subject") or "").strip().lower() == "off"
         if not kind and not sender:
             return {"say": "Who or what should I always put in front of you?"}
-        _priority(PriorityBody(kind=kind or None, sender=sender or None),
-                  user_id=user_id, db=db)
+        body = PriorityBody(kind=kind or None, sender=sender or None)
+        try:
+            (_unpriority if off else _priority)(body, user_id=user_id, db=db)
+        except _HTTPExc as e:  # a refused rule is a sentence back, never a 500
+            return {"say": str(e.detail)}
         record_decision(db, user_id=user_id, agent="inbox",
-                        action_key="inbox.priority", decided_by="user", verdict="accepted",
+                        action_key="inbox.priority", decided_by="user",
+                        verdict="revoked" if off else "accepted",
                         payload={"kind": kind, "sender": sender})
         who = sender or kind
-        return {"say": f"Done — anything from {who} goes straight to Needs you "
-                       "from now on, with a reply already written. Say the word "
-                       "if that turns out to be too much."}
+        if off:
+            return {"say": f"Done. Mail from {who} gets filed on my own judgement again."}
+        return {"say": f"Done. Anything from {who} lands in Needs you from now on, with a "
+                       f"reply drafted. Say \"stop flagging {who}\" if that gets to be too much."}
 
     if action == "mute_mail":
         # "Don't show me Amazon shipping updates" / "nothing from this sender".
         # A standing filter: the mail still syncs, it just files itself away.
+        from fastapi import HTTPException as _HTTPExc
+
         from ..routers.inbox import MuteBody
         from ..routers.inbox import mute as _mute
-        kind = (parsed.get("mute_kind") or "").strip()
-        sender = (parsed.get("mute_sender") or "").strip()
+        kind = (parsed.get("mute_kind") or "").strip()[:120]
+        sender = (parsed.get("mute_sender") or "").strip()[:320]
         if not kind and not sender:
             return {"say": "What should I stop putting in front of you?"}
-        _mute(MuteBody(kind=kind or None, sender=sender or None), user_id=user_id, db=db)
+        try:
+            _mute(MuteBody(kind=kind or None, sender=sender or None), user_id=user_id, db=db)
+        except _HTTPExc as e:
+            return {"say": str(e.detail)}
         record_decision(db, user_id=user_id, agent="inbox",
                         action_key="inbox.mute", decided_by="user", verdict="accepted",
                         payload={"kind": kind, "sender": sender})
-        return {"say": f"Done. {kind or sender} won't come to you again — "
-                       "it'll file itself under handled."}
+        return {"say": f"Done. {kind or sender} stays out of your way from now on; "
+                       "it files itself under handled."}
 
     if action == "auto_reply_rule":
         from ..routers.inbox import set_auto_reply
@@ -694,7 +726,8 @@ def converse(body: ConverseBody, user_id: str = Depends(current_user_id),
         "say": parsed["say"], "action": parsed["action_type"],
         "screen": parsed.get("screen", ""), "listen": parsed.get("listen", False),
         "acted": parsed["action_type"] in ("draft_reply", "send_draft", "send_new_email",
-                                           "set_nutrition", "log_water", "auto_reply_rule"),
+                                           "set_nutrition", "log_water", "auto_reply_rule",
+                                           "mute_mail", "priority_mail"),
     }
 
 

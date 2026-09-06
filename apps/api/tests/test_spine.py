@@ -1579,3 +1579,122 @@ def test_mailboxes_and_knows_and_box_on_messages():
     assert {"facets", "people", "facts"} <= knows.keys()
     assert any(f["name"] == "People" for f in knows["facets"])
 
+
+
+from sqlalchemy import select as select  # noqa: E402
+from superapp.db import SessionLocal as SessionLocal  # noqa: E402
+
+
+def test_priority_rule_removal_and_consumer_domain_guard():
+    """A 'never miss' rule can be dropped again (endpoint and by voice with
+    subject="off"), a bare consumer-provider domain is refused because it
+    would flag every stranger on Gmail, and a refused rule comes back to the
+    voice as a sentence, never a 500."""
+    r = client.post("/v1/inbox/priority", headers=AUTH, json={"sender": "gmail.com"})
+    assert r.status_code == 422
+    r = client.post("/v1/inbox/priority", headers=AUTH, json={"sender": "@Sai.Friend@gmail.com"})
+    assert r.status_code == 200 and "sai.friend@gmail.com" in r.json()["priority"]["senders"]
+    st = client.get("/v1/inbox/state", headers=AUTH).json()
+    assert "sai.friend@gmail.com" in st["priority_senders"]
+    r = client.request("DELETE", "/v1/inbox/priority", headers=AUTH,
+                       json={"sender": "sai.friend@gmail.com"})
+    assert r.status_code == 200 and "sai.friend@gmail.com" not in r.json()["priority"]["senders"]
+
+    from superapp.routers.voice import _execute
+    db = SessionLocal()
+    out = _execute(db, "harshith", {"action_type": "priority_mail", "priority_sender": "outlook.com"})
+    assert "address" in out["say"].lower()
+    _execute(db, "harshith", {"action_type": "priority_mail", "priority_kind": "lease paperwork"})
+    out = _execute(db, "harshith", {"action_type": "priority_mail",
+                                    "priority_kind": "lease paperwork", "subject": "off"})
+    assert "judgement" in out["say"]
+    db.commit()
+    db.close()
+    st = client.get("/v1/inbox/state", headers=AUTH).json()
+    assert "lease paperwork" not in st["priority_kinds"]
+
+
+def test_never_miss_promotes_at_sync():
+    """The rule is enforced where triage happens. For a fresh user whose
+    'never miss' rule names AWS's domain, the AWS bill (heuristically
+    'cleared' as automated) lands in Needs you with a reply drafted and the
+    reason on the card."""
+    from superapp.agents.base import run_think
+    from superapp.models import InboxDraft, InboxMessage
+    from superapp.routers.inbox import PriorityBody
+    from superapp.routers.inbox import priority as _priority
+    from superapp.substrate.inbox import upsert_account
+
+    uid = "nevermiss-tester"
+    db = SessionLocal()
+    upsert_account(db, user_id=uid, email="stub@example.com")
+    _priority(PriorityBody(sender="aws.amazon.com"), user_id=uid, db=db)
+    db.commit()
+    run_think(db, agent="inbox", user_id=uid, trigger={"kind": "email_sync"})
+    db.commit()
+    m = db.scalar(select(InboxMessage).where(InboxMessage.user_id == uid,
+                                             InboxMessage.from_addr == "no-reply@aws.amazon.com"))
+    assert m is not None and m.tier == "needs_reply"
+    assert m.why_now == "you asked not to miss these"
+    assert m.rule_promoted is True
+    d = db.scalar(select(InboxDraft).where(InboxDraft.message_id == m.id))
+    assert d is not None
+    # enabling an auto-reply rule that matches must NOT send it: the model saw no ask
+    import superapp.config as config_module
+    from superapp.routers.inbox import send_matching_pending_drafts
+    settings = config_module.get_settings()
+    prev = settings.gmail_scope_tier
+    settings.gmail_scope_tier = "send"
+    try:
+        assert send_matching_pending_drafts(db, uid, sender="no-reply@aws.amazon.com") == 0
+    finally:
+        settings.gmail_scope_tier = prev
+    db.commit()
+    assert db.get(InboxDraft, d.id).status == "waiting"
+    # an unrelated automated mail stays filed away
+    fig = db.scalar(select(InboxMessage).where(InboxMessage.user_id == uid,
+                                               InboxMessage.from_addr == "team@figma.com"))
+    assert fig is not None and fig.tier != "needs_reply"
+    db.close()
+
+
+def test_mute_sender_covers_needs_you_by_domain_unless_priority():
+    """'Never from this sender' hides their asks too, a domain rule covers
+    every address on it, and a standing 'never miss' rule for the same
+    sender wins over the mute."""
+    from superapp.models import InboxMessage, utcnow
+
+    db = SessionLocal()
+    m = InboxMessage(user_id="harshith", account_email="h@x.com",
+                     gmail_msg_id="mute-dom-1", thread_id="t-mute-dom",
+                     from_name="Cold Sales", from_addr="rep@coldpitch.example",
+                     subject="Quick call?", body_text="Can we hop on a call this week?",
+                     tier="needs_reply", note_kind="cold pitches", received_at=utcnow())
+    db.add(m)
+    db.commit()
+    mid = m.id
+    db.close()
+
+    def ids():
+        return {a["id"] for a in client.get("/v1/inbox/state", headers=AUTH).json()["needs_reply"]}
+
+    assert mid in ids()
+    client.post("/v1/inbox/mute", headers=AUTH, json={"sender": "@coldpitch.example"})
+    assert mid not in ids()
+    client.post("/v1/inbox/priority", headers=AUTH, json={"sender": "coldpitch.example"})
+    assert mid in ids()
+    client.request("DELETE", "/v1/inbox/priority", headers=AUTH, json={"sender": "coldpitch.example"})
+    assert mid not in ids()
+
+
+def test_drafter_neutralizes_senders_placeholders():
+    from superapp.policy import neutralize_placeholders
+    out = neutralize_placeholders("Still [time] at the Space Needle, budget {{amount}}, TBD on wine")
+    assert "[time]" not in out and "{{amount}}" not in out and "TBD" not in out
+    assert out.count("(not specified)") == 3
+    # a sender's real words, tags and code pass through untouched
+    keep = "Can you fill in the date and sign the NDA? [INC-4821] [EXTERNAL] see [1] {\"region\": \"us-east-1\"}"
+    assert neutralize_placeholders(keep) == keep
+    # ...and if the drafter echoes the substitute, the auto-send gate still catches it
+    from superapp.policy import has_placeholder
+    assert has_placeholder("Sure, (not specified) works for me")

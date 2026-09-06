@@ -87,20 +87,19 @@ def inbox_context(db: Session, user_id: str) -> dict:
             "draft": {"id": d.id, "body": d.body, "status": d.status, "deferred": deferred} if d else None,
         }
 
-    from ..models import UserFact
-    mutes_fact = db.scalar(select(UserFact).where(
-        UserFact.user_id == user_id, UserFact.domain == "inbox",
-        UserFact.key == "mutes"))
-    mutes = mutes_fact.value if mutes_fact and mutes_fact.value else {}
-    muted_kinds = {k.lower() for k in mutes.get("kinds", [])}
-    muted_senders = {a.lower() for a in mutes.get("senders", [])}
+    mutes = rules_fact(db, user_id, "mutes")
+    prio = rules_fact(db, user_id, "priority")
 
     def muted(m) -> bool:
-        return (m.from_addr.lower() in muted_senders
-                or ((getattr(m, "note_kind", "") or "").lower() in muted_kinds
-                    if getattr(m, "note_kind", "") else False))
+        # "Never from this sender" covers Needs you too, and a domain rule
+        # covers every address on it. A standing "never miss" rule for the
+        # same mail wins: the promise to surface beats the wish to hide.
+        kind = getattr(m, "note_kind", "") or ""
+        return (rule_matches(mutes, m.from_addr, kind)
+                and not rule_matches(prio, m.from_addr, kind))
 
-    open_asks = [row(m) for m in msgs if m.tier == "needs_reply" and not m.settled]
+    open_asks = [row(m) for m in msgs
+                 if m.tier == "needs_reply" and not m.settled and not muted(m)]
     cleared = [m for m in msgs if m.tier in ("cleared", "receipt")]
     cleared_by_reason: dict[str, int] = {}
     for m in cleared:
@@ -160,9 +159,44 @@ def inbox_context(db: Session, user_id: str) -> dict:
                           if m.tier == "worth_knowing" and not m.settled
                           and not muted(m)][:8],
         "cleared_count": len(cleared) + sum(
-            1 for m in msgs if m.tier == "worth_knowing" and not m.settled and muted(m)),
+            1 for m in msgs
+            if m.tier in ("worth_knowing", "needs_reply") and not m.settled and muted(m)),
         "cleared_by_reason": cleared_by_reason,
         "receipts": [row(m) for m in msgs if m.tier == "receipt"][:10],
         "pending_count": sum(1 for m in msgs if m.tier == "pending"),
         "sent": sent[:10],
     }
+
+
+def rules_fact(db, user_id: str, key: str) -> dict:
+    """A standing sender/kind rule set ("mutes" or "priority") as lowercase
+    sets. Accepts the legacy list shape and the name->true map shape."""
+    from ..models import UserFact
+    fact = db.scalar(select(UserFact).where(
+        UserFact.user_id == user_id, UserFact.domain == "inbox", UserFact.key == key))
+    value = fact.value if fact and fact.value else {}
+    return {"senders": {str(x).lower().strip() for x in (value.get("senders") or {})},
+            "kinds": {str(x).lower().strip() for x in (value.get("kinds") or {})}}
+
+
+def sender_matches(rules: set, from_addr: str) -> bool:
+    """An exact address matches itself. A rule with no local part
+    ("amazon.com", "@amazon.com") matches every address on that domain and
+    its subdomains, never a look-alike ("amazon.com.evil.co")."""
+    addr = (from_addr or "").lower().strip()
+    domain = addr.rsplit("@", 1)[-1] if "@" in addr else ""
+    for rule in rules:
+        r = rule.lstrip("@").strip()
+        if not r:
+            continue
+        if "@" in r:
+            if addr == r:
+                return True
+        elif domain and (domain == r or domain.endswith("." + r)):
+            return True
+    return False
+
+
+def rule_matches(rules: dict, from_addr: str, kind: str) -> bool:
+    k = (kind or "").lower().strip()
+    return sender_matches(rules["senders"], from_addr) or bool(k and k in rules["kinds"])

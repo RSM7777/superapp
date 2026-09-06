@@ -155,37 +155,15 @@ def _heuristic_triage(msg) -> dict:
 
 
 def _priority_rules(db: Session, user_id: str) -> dict:
-    """The "never miss this" list — the mirror of mutes. Kept deliberately
-    generic: a rule is a domain, an address, or a triage kind, because people
-    say "anything from Amazon support", not "support@amazon.com"."""
-    from sqlalchemy import select as _select
-
-    from ..models import UserFact
-    fact = db.scalar(_select(UserFact).where(
-        UserFact.user_id == user_id, UserFact.domain == "inbox",
-        UserFact.key == "priority"))
-    value = fact.value if fact and fact.value else {}
-    return {"senders": {str(x).lower() for x in (value.get("senders") or {})},
-            "kinds": {str(x).lower() for x in (value.get("kinds") or {})}}
+    """The "never miss this" list, the mirror of mutes. One matcher serves
+    triage here and the view layer (substrate.inbox) so the two never drift."""
+    from ..substrate.inbox import rules_fact
+    return rules_fact(db, user_id, "priority")
 
 
 def _is_priority(rules: dict, from_addr: str, kind: str) -> bool:
-    """Match a whole domain by default. "amazon.com" and "@amazon.com" both
-    catch every address Amazon sends from, which is the point — one rule
-    should not miss because they moved from ship- to order-confirm@."""
-    addr = (from_addr or "").lower().strip()
-    domain = addr.rsplit("@", 1)[-1] if "@" in addr else ""
-    for rule in rules["senders"]:
-        r = rule.lstrip("@").strip()
-        if not r:
-            continue
-        if "@" in rule and not rule.startswith("@"):
-            if addr == rule:              # an exact address was given
-                return True
-        elif domain and (domain == r or domain.endswith("." + r)):
-            return True                   # a domain: catches every sender on it
-    k = (kind or "").lower().strip()
-    return bool(k and k in rules["kinds"])
+    from ..substrate.inbox import rule_matches
+    return rule_matches(rules, from_addr, kind)
 
 
 def _triage_one(db: Session, context: ContextSlice, provider: LLMProvider, msg) -> dict:
@@ -233,7 +211,7 @@ def _verify_clear(db: Session, context: ContextSlice, provider: LLMProvider, msg
 def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg) -> str:
     from ..substrate.facts import read_facts as _read_facts
 
-    from ..policy import has_placeholder
+    from ..policy import has_placeholder, neutralize_placeholders
 
     style = _fact(context, "reply_style")
     # Who the user IS — without this the model invents a signature name.
@@ -242,7 +220,10 @@ def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg)
     name = identity.get("name") or context.user_id.capitalize()
     payload = {
         "you_are": {"name": name, "email": msg.account_email},
-        "email": {"from_name": msg.from_name, "subject": msg.subject, "body": msg.body_text[:6000]},
+        # The sender's own blanks ("let's say [time]") read as plain words, so
+        # the drafter treats them as missing information, not a token to echo.
+        "email": {"from_name": msg.from_name, "subject": msg.subject,
+                  "body": neutralize_placeholders(msg.body_text[:6000])},
         "reply_style_notes": (style or {}).get("notes", ""),
         "user_facts": [f for f in context.facts if f["domain"] in ("goals", "identity")],
         "playbooks": [{"when": (f.value or {}).get("when", ""),
@@ -376,8 +357,11 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
             # enforced here rather than left to the model's judgement — and it
             # lands before the draft is written, so the card arrives complete
             # with a reply waiting instead of empty.
+            promoted = False
             if _is_priority(priority, msg.from_addr, msg.note_kind):
+                promoted = msg.tier != "needs_reply"
                 msg.tier = "needs_reply"
+                msg.rule_promoted = promoted
                 if not msg.why_now:
                     msg.why_now = "you asked not to miss these"
             msg.suspicious = (bool(verdict.get("suspicious"))
@@ -426,6 +410,7 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                         and settings.gmail_scope_tier in ("send", "modify")
                         and _auto_reply_match(db, context.user_id, msg.note_kind, msg.from_addr)
                         and gate.allowed
+                        and not promoted  # a rule surfaced it; the model saw no ask to answer
                         and not has_placeholder(draft.body)
                         and not draft_leaks_new_destination(
                             draft.body, msg.body_text,

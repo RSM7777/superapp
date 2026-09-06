@@ -278,6 +278,7 @@ def inbox_state(user_id: str = Depends(current_user_id), db: Session = Depends(g
     ar_fact = _autoreply_fact(db, user_id)
     auto_kinds = list((ar_fact.value or {}).get("kinds", [])) if ar_fact else []
     auto_senders = list((ar_fact.value or {}).get("senders", [])) if ar_fact else []
+    prio_kinds, prio_senders = _priority_fact_maps(db, user_id)
 
     return {
         "connected": data.get("connected", False),
@@ -285,6 +286,8 @@ def inbox_state(user_id: str = Depends(current_user_id), db: Session = Depends(g
         "reauth": reauth,
         "auto_reply_kinds": auto_kinds,
         "auto_reply_senders": auto_senders,
+        "priority_kinds": list(prio_kinds),
+        "priority_senders": list(prio_senders),
         "synced_at": last_sync.created_at.isoformat() if last_sync else None,
         "needs_reply": data.get("needs_reply", []),
         "worth_knowing": data.get("worth_knowing", []),
@@ -421,6 +424,8 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
             continue
         if getattr(msg, "suspicious", False):
             continue  # a steering email never auto-sends, even on an explicit rule
+        if getattr(msg, "rule_promoted", False):
+            continue  # a "never miss" rule surfaced it; the model saw no ask to answer
         if not assess("inbox.auto_reply", provenance="user").allowed:
             continue
         if has_placeholder(d.body):
@@ -509,7 +514,7 @@ def mute(body: MuteBody, user_id: str = Depends(current_user_id),
     if body.kind:
         kinds[body.kind.strip()[:120]] = True
     if body.sender:
-        senders[body.sender.strip().lower()[:320]] = True
+        senders[_clean_sender(body.sender)[:320]] = True
     value = _fit({"kinds": kinds, "senders": senders})
     write_fact(db, user_id=user_id, domain="inbox", key="mutes", value=value,
                confidence=1.0, source_agent="inbox")
@@ -522,6 +527,36 @@ def mute(body: MuteBody, user_id: str = Depends(current_user_id),
 class PriorityBody(BaseModel):
     kind: str | None = Field(default=None, max_length=120)
     sender: str | None = Field(default=None, max_length=320)
+
+
+# A bare domain rule on one of these would promote every stranger who mails
+# from that provider. A person there is named by their exact address.
+_CONSUMER_DOMAINS = {
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
+    "yahoo.com", "yahoo.co.in", "yahoo.co.uk", "yahoo.in", "ymail.com", "rocketmail.com",
+    "hotmail.co.uk", "hotmail.co.in", "outlook.co.uk", "outlook.in", "live.co.uk", "live.in",
+    "icloud.com", "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com", "pm.me",
+    "zoho.com", "zohomail.in", "gmx.com", "gmx.de", "mail.com", "rediffmail.com", "yandex.com",
+}
+
+
+def _clean_sender(raw: str) -> str:
+    """'Sai <sai@x.com>' -> 'sai@x.com'; '@Amazon.com' -> 'amazon.com'."""
+    from email.utils import parseaddr
+    _, addr = parseaddr(raw or "")
+    return (addr or raw or "").strip().lower().lstrip("@")
+
+
+def _priority_fact_maps(db: Session, user_id: str) -> tuple[dict, dict]:
+    from sqlalchemy import select as _select
+
+    from ..models import UserFact
+    fact = db.scalar(_select(UserFact).where(
+        UserFact.user_id == user_id, UserFact.domain == "inbox",
+        UserFact.key == "priority"))
+    kinds = _as_map(fact.value.get("kinds")) if fact and fact.value else {}
+    senders = _as_map(fact.value.get("senders")) if fact and fact.value else {}
+    return kinds, senders
 
 
 @router.post("/inbox/priority")
@@ -545,11 +580,49 @@ def priority(body: PriorityBody, user_id: str = Depends(current_user_id),
     if body.kind:
         kinds[body.kind.strip()[:120]] = True
     if body.sender:
-        senders[body.sender.strip().lower().lstrip("@")[:320]] = True
+        addr = _clean_sender(body.sender)[:320]
+        if "@" not in addr and addr in _CONSUMER_DOMAINS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{addr} is a shared mail provider, so that rule would flag every "
+                       "stranger on it. Give me the person's address instead.")
+        senders[addr] = True
+    before = len(kinds) + len(senders)
     value = _fit({"kinds": kinds, "senders": senders})
+    if len(value["kinds"]) + len(value["senders"]) < before:
+        # A standing promise must never be dropped silently to make room.
+        raise HTTPException(status_code=409,
+                            detail="That's as many standing rules as I can hold. Drop one first.")
     write_fact(db, user_id=user_id, domain="inbox", key="priority", value=value,
                confidence=1.0, source_agent="inbox")
     append_event(db, user_id=user_id, type="inbox_prioritised", agent="inbox", domain="inbox",
+                 payload={"kind": body.kind or "", "sender": body.sender or ""})
+    db.commit()
+    return {"ok": True, "priority": value}
+
+
+@router.delete("/inbox/priority")
+def unpriority(body: PriorityBody, user_id: str = Depends(current_user_id),
+               db: Session = Depends(get_db)):
+    """Drop a 'never miss' rule. Mail from that sender or kind goes back to
+    being filed on the model's judgement."""
+    if not body.kind and not body.sender:
+        raise HTTPException(status_code=422, detail="kind or sender required")
+    from ..substrate.facts import write_fact
+    kinds, senders = _priority_fact_maps(db, user_id)
+    before = len(kinds) + len(senders)
+    if body.kind:
+        want = body.kind.strip().lower()
+        kinds = {k: v for k, v in kinds.items() if k.lower() != want}
+    if body.sender:
+        want = _clean_sender(body.sender)
+        senders = {k: v for k, v in senders.items() if k.lower().lstrip("@") != want}
+    value = {"kinds": kinds, "senders": senders}
+    if len(kinds) + len(senders) == before:
+        return {"ok": True, "priority": value, "removed": False}  # nothing to drop
+    write_fact(db, user_id=user_id, domain="inbox", key="priority", value=value,
+               confidence=1.0, source_agent="inbox")
+    append_event(db, user_id=user_id, type="inbox_unprioritised", agent="inbox", domain="inbox",
                  payload={"kind": body.kind or "", "sender": body.sender or ""})
     db.commit()
     return {"ok": True, "priority": value}

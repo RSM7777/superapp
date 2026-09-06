@@ -161,42 +161,56 @@ async def chat_completions(request: Request, db: Session = Depends(get_db),
         except Exception:
             yield _openai_chunk(rid, "Sorry — say that again?")
         else:
-            _run_action(user_id, tag_text)
+            override = _run_action(user_id, tag_text)
+            if override.get("say"):
+                # A refused or incomplete rule is spoken, never swallowed
+                # after the model has already said "done".
+                yield _openai_chunk(rid, " " + override["say"])
         yield _openai_chunk(rid, finish="stop")
         yield "data: [DONE]\n\n"
 
-    def _run_action(uid: str, tag: str) -> None:
+    def _run_action(uid: str, tag: str) -> dict:
+        """Returns the executor's override (a `say` when it refused or needs
+        more), or {} when there was nothing to add."""
         if "<<action:" not in tag:
-            return
+            return {}
         try:
             payload = json.loads(tag.split("<<action:", 1)[1].rsplit(">>", 1)[0])
         except (json.JSONDecodeError, IndexError):
-            return
+            return {}
         kind = payload.get("type", "")
+        override: dict = {}
         # Server-side effects reuse the converse executor verbatim.
         if kind in ("draft_reply", "send_draft", "send_new_email", "set_nutrition",
-                    "log_water", "research_task", "connect_site"):
+                    "log_water", "research_task", "connect_site", "auto_reply_rule",
+                    "mute_mail", "priority_mail"):
             from ..db import SessionLocal
 
             adb = SessionLocal()
             try:
-                _execute(adb, uid, {
+                override = _execute(adb, uid, {
                     "action_type": kind,
                     "draft_id": payload.get("draft_id", ""),
                     "message_id": payload.get("message_id", ""),
                     "reply_body": payload.get("reply_body", ""),
                     "to_addr": payload.get("to_addr", ""),
                     "subject": payload.get("subject", ""),
+                    "mute_kind": payload.get("mute_kind", ""),
+                    "mute_sender": payload.get("mute_sender", ""),
+                    "priority_kind": payload.get("priority_kind", ""),
+                    "priority_sender": payload.get("priority_sender", ""),
                     "profile_json": (json.dumps(payload["profile"])
                                      if isinstance(payload.get("profile"), dict)
                                      else payload.get("profile_json", "")),
                 })
                 append_event(adb, user_id=uid, type="voice_command", agent="orb",
-                             payload={"heard": "", "action": kind, "via": "realtime"})
+                             payload={"heard": "", "action": kind, "via": "realtime",
+                                      "refused": bool((override or {}).get("say"))})
                 adb.commit()
             finally:
                 adb.close()
         elif kind in ("open_screen", "refresh_inbox", "start_interview"):
             _queue_client_action(uid, {"type": kind, "screen": payload.get("screen", "")})
+        return override or {}
 
     return StreamingResponse(stream(), media_type="text/event-stream")

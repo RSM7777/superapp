@@ -129,8 +129,19 @@ _PLACEHOLDER_RE = re.compile(
     r"|\b(?:TBD|TBA|TODO)\b"
     r"|\b(?:insert|fill in)\s+(?:the\s+|a\s+|your\s+)?"
     r"(?:time|date|day|name|place|number|amount|link|details?)\b"
-    r"|_{3,}",
+    r"|_{3,}"
+    r"|\(not specified\)",   # the inbound substitute, if a draft echoes it back
     re.IGNORECASE,
+)
+
+# What counts as a blank in a SENDER's mail is much narrower: only an obvious
+# lowercase template token. Ticket tags ([INC-4821], [EXTERNAL]), citations,
+# JSON and plain prose ("fill in the date") must pass through untouched.
+_INBOUND_BLANK_RE = re.compile(
+    r"\[(?![\d\s]+\])[a-z][a-z ]{0,25}\]"
+    r"|\{\{?[a-z][a-z ]{0,25}\}?\}"
+    r"|\b(?:TBD|TBA)\b"
+    r"|_{3,}"
 )
 
 
@@ -139,3 +150,10 @@ def has_placeholder(text: str) -> bool:
     is not finished writing: it may sit in the inbox for the user to edit, but
     it never auto-sends, and the drafter is asked to rewrite it once first."""
     return bool(_PLACEHOLDER_RE.search(text or ""))
+
+
+def neutralize_placeholders(text: str) -> str:
+    """Rewrite a sender's own fill-in blanks ("let's say [time]") as plain
+    words before the drafter sees them, so they read as information that is
+    missing rather than a token to repeat back."""
+    return _INBOUND_BLANK_RE.sub("(not specified)", text or "")
