@@ -1410,3 +1410,50 @@ def test_sender_scoped_autoreply_and_chat_rule():
     st = client.get("/v1/inbox/state", headers=AUTH).json()
     assert "boss@example.com" not in st.get("auto_reply_senders", [])
 
+
+
+def test_never_miss_rule_promotes_mail_to_needs_you():
+    """'Don't let me miss anything from Amazon support' is a promise, so it is
+    enforced in code rather than left to the model. A domain rule must catch
+    every address on that domain, must beat a mute, and must not leak onto
+    look-alike domains."""
+    from superapp.agents.inbox import _is_priority, _priority_rules
+    from superapp.db import SessionLocal
+
+    r = client.post("/v1/inbox/priority", headers=AUTH, json={"sender": "@amazon.com"})
+    assert r.status_code == 200, r.text
+    assert "amazon.com" in r.json()["priority"]["senders"]
+
+    with SessionLocal() as db:
+        rules = _priority_rules(db, "harshith")
+    # every address on the domain, however they change it
+    assert _is_priority(rules, "support@amazon.com", "")
+    assert _is_priority(rules, "ship-confirm@amazon.com", "")
+    assert _is_priority(rules, "auto@marketplace.amazon.com", "")
+    # but not a look-alike someone registered to phish
+    assert not _is_priority(rules, "billing@amazon.com.evil.co", "")
+    assert not _is_priority(rules, "hello@notamazon.com", "")
+    assert not _is_priority(rules, "a@example.com", "")
+
+    # a described stream, matched on the triage kind
+    client.post("/v1/inbox/priority", headers=AUTH, json={"kind": "lease paperwork"})
+    with SessionLocal() as db:
+        rules = _priority_rules(db, "harshith")
+    assert _is_priority(rules, "anyone@example.com", "lease paperwork")
+    assert not _is_priority(rules, "anyone@example.com", "newsletters")
+
+
+def test_never_miss_beats_mute():
+    """If the two rules disagree, the one that says 'do not hide this' wins."""
+    from superapp.agents.inbox import _is_priority, _priority_rules
+    from superapp.db import SessionLocal
+
+    client.post("/v1/inbox/mute", headers=AUTH, json={"sender": "noreply@shipping.test"})
+    client.post("/v1/inbox/priority", headers=AUTH, json={"sender": "shipping.test"})
+    with SessionLocal() as db:
+        rules = _priority_rules(db, "harshith")
+    assert _is_priority(rules, "noreply@shipping.test", "")
+
+
+def test_priority_endpoint_rejects_an_empty_rule():
+    assert client.post("/v1/inbox/priority", headers=AUTH, json={}).status_code == 422

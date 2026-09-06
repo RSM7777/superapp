@@ -48,6 +48,14 @@ CONVERSE_SYSTEM = (
     "three keep `say` SHORT or empty — the next segment speaks for itself. "
     "Any real question, even mid-brief, you answer in place with "
     "action=none and listen=true; do NOT skip ahead just because they spoke.\n"
+    "NEVER MISS: \"I don't want to miss anything from X\", \"always show me "
+    "Y\", \"flag anything from Z\", \"put those in Needs you\" is a standing "
+    "promise: action=priority_mail. Prefer priority_sender as a bare DOMAIN "
+    "(\"amazon.com\") — it catches every address they send from. NEVER invent "
+    "a specific address like support@amazon.com; a guessed address looks "
+    "precise and then silently never matches. Use priority_kind only when "
+    "they describe a stream rather than a sender. Read the rule back in one "
+    "line so a wrong guess is caught now, not in three weeks.\n"
     "STANDING RULES: \"don't show me X\", \"stop bringing me Y\", \"I never "
     "want mail from Z\" is a durable filter, not a one-off: "
     "action=mute_mail with mute_kind (a description like \"Amazon shipping "
@@ -157,7 +165,7 @@ CONVERSE_SCHEMA = {
                                  "set_nutrition", "log_water", "research_task",
                                  "connect_site", "auto_reply_rule", "end_conversation",
                                  "next_segment", "previous_segment", "repeat_segment",
-                                 "mute_mail"]},
+                                 "mute_mail", "priority_mail"]},
         "screen": {"type": "string", "enum": ["hub", "inbox", "home", "finance", "stylist", "flights", ""]},
         "draft_id": {"type": "string"},
         "message_id": {"type": "string"},
@@ -169,10 +177,16 @@ CONVERSE_SCHEMA = {
         # -> mute_kind; "nothing from this sender again" -> mute_sender.
         "mute_kind": {"type": "string"},
         "mute_sender": {"type": "string"},
+        # priority_mail: the opposite promise. "Don't let me miss anything
+        # from Amazon support" -> priority_sender "amazon.com" (a domain, not
+        # a guessed address), or priority_kind for a described stream.
+        "priority_kind": {"type": "string"},
+        "priority_sender": {"type": "string"},
         "listen": {"type": "boolean"},
     },
     "required": ["say", "action_type", "screen", "draft_id", "message_id", "reply_body",
-                 "to_addr", "subject", "profile_json", "mute_kind", "mute_sender", "listen"],
+                 "to_addr", "subject", "profile_json", "mute_kind", "mute_sender",
+                 "priority_kind", "priority_sender", "listen"],
     "additionalProperties": False,
 }
 
@@ -342,6 +356,25 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
         append_event(db, user_id=user_id, type="nutrition_plan_set", agent="orb",
                      domain="nutrition", payload={k: plan[k] for k in ("kcal", "goal")})
         return {}
+    if action == "priority_mail":
+        # "Never let me miss X." Stored as a standing rule and enforced in
+        # triage, so it cannot be quietly forgotten on a later run.
+        from ..routers.inbox import PriorityBody
+        from ..routers.inbox import priority as _priority
+        kind = (parsed.get("priority_kind") or "").strip()
+        sender = (parsed.get("priority_sender") or "").strip()
+        if not kind and not sender:
+            return {"say": "Who or what should I always put in front of you?"}
+        _priority(PriorityBody(kind=kind or None, sender=sender or None),
+                  user_id=user_id, db=db)
+        record_decision(db, user_id=user_id, agent="inbox",
+                        action_key="inbox.priority", decided_by="user", verdict="accepted",
+                        payload={"kind": kind, "sender": sender})
+        who = sender or kind
+        return {"say": f"Done — anything from {who} goes straight to Needs you "
+                       "from now on, with a reply already written. Say the word "
+                       "if that turns out to be too much."}
+
     if action == "mute_mail":
         # "Don't show me Amazon shipping updates" / "nothing from this sender".
         # A standing filter: the mail still syncs, it just files itself away.

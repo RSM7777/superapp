@@ -26,3 +26,4 @@ backups/
 apps/mobile/ios/
 apps/mobile/build/
 apps/mobile/android/
+.env.bak

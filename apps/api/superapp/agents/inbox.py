@@ -148,6 +148,40 @@ def _heuristic_triage(msg) -> dict:
             "clear_reason": "", "suspicious": sus}
 
 
+def _priority_rules(db: Session, user_id: str) -> dict:
+    """The "never miss this" list — the mirror of mutes. Kept deliberately
+    generic: a rule is a domain, an address, or a triage kind, because people
+    say "anything from Amazon support", not "support@amazon.com"."""
+    from sqlalchemy import select as _select
+
+    from ..models import UserFact
+    fact = db.scalar(_select(UserFact).where(
+        UserFact.user_id == user_id, UserFact.domain == "inbox",
+        UserFact.key == "priority"))
+    value = fact.value if fact and fact.value else {}
+    return {"senders": {str(x).lower() for x in (value.get("senders") or {})},
+            "kinds": {str(x).lower() for x in (value.get("kinds") or {})}}
+
+
+def _is_priority(rules: dict, from_addr: str, kind: str) -> bool:
+    """Match a whole domain by default. "amazon.com" and "@amazon.com" both
+    catch every address Amazon sends from, which is the point — one rule
+    should not miss because they moved from ship- to order-confirm@."""
+    addr = (from_addr or "").lower().strip()
+    domain = addr.rsplit("@", 1)[-1] if "@" in addr else ""
+    for rule in rules["senders"]:
+        r = rule.lstrip("@").strip()
+        if not r:
+            continue
+        if "@" in rule and not rule.startswith("@"):
+            if addr == rule:              # an exact address was given
+                return True
+        elif domain and (domain == r or domain.endswith("." + r)):
+            return True                   # a domain: catches every sender on it
+    k = (kind or "").lower().strip()
+    return bool(k and k in rules["kinds"])
+
+
 def _triage_one(db: Session, context: ContextSlice, provider: LLMProvider, msg) -> dict:
     payload = {
         "email": {"from_name": msg.from_name, "from_addr": msg.from_addr,
@@ -302,6 +336,7 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                 old_mail = client.backfill(40)
                 backfill_ids = {m["gmail_msg_id"] for m in old_mail}
                 msgs = list(msgs) + old_mail
+        priority = _priority_rules(db, context.user_id)
         for raw in msgs:
             msg = insert_message(db, user_id=context.user_id, account_email=acct.email, msg=raw)
             if msg is None:
@@ -314,6 +349,14 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
             msg.why_now = verdict["why_now"][:120]
             msg.clear_reason = verdict["clear_reason"][:120]
             msg.note_kind = str(verdict.get("kind", ""))[:120]
+            # "Don't let me miss anything from X." A standing promise, so it is
+            # enforced here rather than left to the model's judgement — and it
+            # lands before the draft is written, so the card arrives complete
+            # with a reply waiting instead of empty.
+            if _is_priority(priority, msg.from_addr, msg.note_kind):
+                msg.tier = "needs_reply"
+                if not msg.why_now:
+                    msg.why_now = "you asked not to miss these"
             msg.suspicious = (bool(verdict.get("suspicious"))
                               or looks_like_injection(msg.body_text))
             if msg.suspicious:

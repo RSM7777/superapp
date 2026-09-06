@@ -452,6 +452,42 @@ def mute(body: MuteBody, user_id: str = Depends(current_user_id),
     return {"ok": True, "mutes": value}
 
 
+class PriorityBody(BaseModel):
+    kind: str | None = Field(default=None, max_length=120)
+    sender: str | None = Field(default=None, max_length=320)
+
+
+@router.post("/inbox/priority")
+def priority(body: PriorityBody, user_id: str = Depends(current_user_id),
+             db: Session = Depends(get_db)):
+    """'Never let me miss X' — the opposite of mute. Anything matching goes
+    to needs_reply at triage, with a reply drafted, however the model would
+    otherwise have filed it. A sender here is treated as a whole domain by
+    default, so one rule survives them changing which address they send from."""
+    if not body.kind and not body.sender:
+        raise HTTPException(status_code=422, detail="kind or sender required")
+    from sqlalchemy import select as _select
+
+    from ..models import UserFact
+    from ..substrate.facts import write_fact
+    fact = db.scalar(_select(UserFact).where(
+        UserFact.user_id == user_id, UserFact.domain == "inbox",
+        UserFact.key == "priority"))
+    kinds = _as_map(fact.value.get("kinds")) if fact and fact.value else {}
+    senders = _as_map(fact.value.get("senders")) if fact and fact.value else {}
+    if body.kind:
+        kinds[body.kind.strip()[:120]] = True
+    if body.sender:
+        senders[body.sender.strip().lower().lstrip("@")[:320]] = True
+    value = _fit({"kinds": kinds, "senders": senders})
+    write_fact(db, user_id=user_id, domain="inbox", key="priority", value=value,
+               confidence=1.0, source_agent="inbox")
+    append_event(db, user_id=user_id, type="inbox_prioritised", agent="inbox", domain="inbox",
+                 payload={"kind": body.kind or "", "sender": body.sender or ""})
+    db.commit()
+    return {"ok": True, "priority": value}
+
+
 @router.post("/inbox/notes/{message_id}/settle")
 def settle_note(message_id: str, user_id: str = Depends(current_user_id),
                 db: Session = Depends(get_db)):
