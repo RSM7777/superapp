@@ -2,6 +2,7 @@
 // what Nano auto-replies to, and everything it has come to know (people and
 // what it's learned about you). A page, matched to Nano V1 (8).
 import { LinearGradient } from "expo-linear-gradient";
+import Constants from "expo-constants";
 import * as WebBrowser from "expo-web-browser";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -236,6 +237,8 @@ export function ProfileScreen({
       <Pressable style={s.signOut} onPress={onSignOut}>
         <Text style={s.signOutText}>Sign out</Text>
       </Pressable>
+
+      <Text style={s.version}>Nano {Constants.expoConfig?.version ?? ""}</Text>
     </ScrollView>
   );
 }
@@ -295,4 +298,5 @@ const s = StyleSheet.create({
     borderColor: "rgba(255,157,168,0.4)", paddingVertical: 13, alignItems: "center",
   },
   signOutText: { fontFamily: SANS_SEMI, fontSize: 14, color: C.rose },
+  version: { fontFamily: MONO, fontSize: 10, letterSpacing: 1, color: "rgba(138,135,163,0.5)", textAlign: "center", marginTop: 20 },
 });
