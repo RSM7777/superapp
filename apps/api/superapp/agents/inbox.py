@@ -364,10 +364,12 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                             draft.body, msg.body_text,
                             allowed=f"{msg.from_addr} {msg.account_email}")):
                     from ..push import live_activity as _la
+                    _AR_STEPS = ["Reading", "Drafting", "Sending", "Sent"]
                     _la(db, user_id=context.user_id, event="start",
                         title="Auto-reply",
                         state={"status": f"Replying to {msg.from_name}",
                                "stage": f"Replying to {msg.from_name}",
+                               "steps": _AR_STEPS, "stepIndex": 2,
                                "quoteLabel": "WHAT'S GOING OUT",
                                "quote": draft.body[:140]})
                     try:
@@ -375,7 +377,9 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                             to_addr=msg.from_addr, subject=msg.subject,
                             body=draft.body, thread_id=msg.thread_id)
                         _la(db, user_id=context.user_id, event="end",
-                            state={"status": "Sent.", "stage": "Sent."})
+                            state={"status": "Sent.",
+                                   "stage": f"Sent to {msg.from_name}.",
+                                   "steps": _AR_STEPS, "stepIndex": 3})
                         from ..models import utcnow as _utcnow
                         draft.status = "sent"
                         draft.sent_at = _utcnow()
@@ -394,7 +398,8 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                         # Send failed: the draft simply waits like any other —
                         # but end the lock-screen activity so it can't linger.
                         _la(db, user_id=context.user_id, event="end",
-                            state={"status": "Held for you.", "stage": "Held for you."})
+                            state={"status": "Held for you.", "stage": "Held for you.",
+                                   "steps": _AR_STEPS, "stepIndex": 2})
             counts[msg.tier] += 1
             # Nano's own verdicts go in the ledger too — the "did without
             # asking" side of the autonomy panel is counted, never estimated.
