@@ -1457,3 +1457,74 @@ def test_never_miss_beats_mute():
 
 def test_priority_endpoint_rejects_an_empty_rule():
     assert client.post("/v1/inbox/priority", headers=AUTH, json={}).status_code == 422
+
+
+def test_enabling_autoreply_sends_the_waiting_draft():
+    """'Auto-reply to these' clears what's already written: turning on the
+    rule for a kind sends the pending draft that matches, right now."""
+    import superapp.config as config_module
+
+    from superapp.models import InboxMessage, utcnow
+    from superapp.substrate.inbox import create_draft
+
+    settings = config_module.get_settings()
+    prev = settings.gmail_scope_tier
+    settings.gmail_scope_tier = "send"
+    try:
+        db = SessionLocal()
+        m = InboxMessage(user_id="harshith", account_email="h@x.com",
+                         gmail_msg_id="ar-wait-1", thread_id="t-ar-wait",
+                         from_name="Recruiter Rita", from_addr="rita@firm.example",
+                         subject="quick call?", body_text="Are you free Tuesday?",
+                         tier="needs_reply", note_kind="recruiter pings",
+                         received_at=utcnow())
+        db.add(m)
+        db.flush()
+        d = create_draft(db, user_id="harshith", message_id=m.id,
+                         body="Thanks Rita, not looking right now.")
+        db.commit()
+        mid, did = m.id, d.id
+        db.close()
+
+        r = client.post("/v1/inbox/autoreply", headers=AUTH,
+                        json={"kind": "recruiter pings"}).json()
+        assert r["sent_now"] >= 1
+
+        from superapp.models import InboxDraft
+        db = SessionLocal()
+        assert db.get(InboxDraft, did).status == "sent"
+        assert db.get(InboxMessage, mid).tier == "worth_knowing"
+        db.close()
+    finally:
+        settings.gmail_scope_tier = prev
+
+
+def test_mailboxes_and_knows_and_box_on_messages():
+    """Multi-mailbox surfaces: state carries a mailboxes list + per-message box,
+    /inbox/mailboxes lists them, /profile/knows returns people + facts."""
+    from superapp.models import InboxMessage, utcnow
+
+    db = SessionLocal()
+    db.add(InboxMessage(user_id="harshith", account_email="h@x.com",
+                        gmail_msg_id="box-1", thread_id="t-box",
+                        from_name="Someone", from_addr="s@x.com",
+                        subject="hi", body_text="hi there",
+                        tier="worth_knowing", received_at=utcnow()))
+    db.commit()
+    db.close()
+
+    st = client.get("/v1/inbox/state", headers=AUTH).json()
+    assert "mailboxes" in st
+    # every worth_knowing row carries the mailbox it came from
+    boxed = [n for n in st["worth_knowing"] if n.get("box")]
+    assert boxed and all("box" in n for n in st["worth_knowing"])
+
+    mb = client.get("/v1/inbox/mailboxes", headers=AUTH).json()["mailboxes"]
+    assert isinstance(mb, list)
+    if mb:
+        assert {"email", "primary", "color", "count"} <= mb[0].keys()
+
+    knows = client.get("/v1/profile/knows", headers=AUTH).json()
+    assert {"facets", "people", "facts"} <= knows.keys()
+    assert any(f["name"] == "People" for f in knows["facets"])
+

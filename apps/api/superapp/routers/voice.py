@@ -400,19 +400,23 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
             return {"say": "Tell me who to auto-reply to, or what kind of email."}
         if addr and ("@" not in addr or " " in addr):
             return {"say": "I don't have a real address for them yet. What is it?"}
+        from ..routers.inbox import send_matching_pending_drafts
         set_auto_reply(db, user_id, kind=kind or None, sender=addr or None, on=on)
         who = addr or kind
+        sent_now = send_matching_pending_drafts(db, user_id, kind=kind or None,
+                                                sender=addr or None) if on else 0
         record_decision(db, user_id=user_id, agent="inbox",
                         action_key="inbox.auto_reply_rule", decided_by="user",
                         verdict="accepted" if on else "rejected",
-                        payload={"sender": addr, "kind": kind, "on": on})
+                        payload={"sender": addr, "kind": kind, "on": on, "sent_now": sent_now})
         if not on:
             return {"say": f"Done, I've turned auto-reply off for {who}."}
+        lead = (f"Sent the {sent_now} that {'was' if sent_now == 1 else 'were'} already waiting. "
+                if sent_now else "")
         if addr:
-            return {"say": f"Done. From now on I answer emails from {who} myself, "
-                           "signed as you, and every one lands under Worth knowing. "
-                           "Only future mail, never the ones already here."}
-        return {"say": f"Done. I'll auto-reply to {who} from now on, signed as you, "
+            return {"say": f"{lead}From now on I answer emails from {who} myself, "
+                           "signed as you, and every one lands under Worth knowing."}
+        return {"say": f"{lead}I'll auto-reply to {who} from now on, signed as you, "
                        "and surface each under Worth knowing."}
     if action == "connect_site" and parsed.get("reply_body"):
         from ..models import AgentTask

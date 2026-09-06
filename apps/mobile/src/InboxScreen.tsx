@@ -42,16 +42,17 @@ const CAT_COLORS: Record<string, string> = {
 
 type Draft = { id: string; body: string; status: string; deferred?: boolean };
 type Ask = {
-  id: string; from_name: string; from_addr?: string; subject: string; gist: string;
+  id: string; from_name: string; from_addr?: string; box?: string; subject: string; gist: string;
   why_now: string; kind: string; received_at: string; body: string; draft: Draft | null;
 };
 type Note = {
-  id: string; from_name: string; from_addr: string; subject: string;
+  id: string; from_name: string; from_addr: string; box?: string; subject: string;
   gist: string; why_now: string; kind: string; body: string; draft?: Draft | null;
 };
 type HandledCat = { name: string; n: string; count: number };
+type Mailbox = { email: string; primary: boolean; color: string; count: number };
 type InboxState = {
-  connected: boolean; synced_at: string | null;
+  connected: boolean; synced_at: string | null; mailboxes?: Mailbox[];
   reauth: { needed: boolean; email: string; auth_url: string | null } | null;
   needs_reply: Ask[]; worth_knowing: Note[];
   handled_count: number; handled_categories: HandledCat[];
@@ -207,6 +208,10 @@ export function InboxScreen({
     } catch { /* ignore */ }
   }, [apiUrl, auth, refresh]);
 
+  const boxes = state?.mailboxes ?? [];
+  const multiBox = boxes.length > 1;
+  const boxColor = (email?: string) => boxes.find((b) => b.email === email)?.color ?? "#818CF8";
+  const boxName = (email?: string) => (email ? email.split("@")[0] : "");
   const asks = (state?.needs_reply ?? []).filter((a) => !resolvedIds.current.has(a.id));
   const openAsks = asks.filter((a) => !a.draft?.deferred);
   const notes = (state?.worth_knowing ?? []).filter((n) => !resolvedIds.current.has(n.id));
@@ -294,7 +299,15 @@ export function InboxScreen({
                         <Text style={s.tileText}>{initials(a.from_name)}</Text>
                       </LinearGradient>
                       <View style={{ flex: 1, minWidth: 0 }}>
-                        <Text style={s.from}>{a.from_name}</Text>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                          <Text style={s.from} numberOfLines={1}>{a.from_name}</Text>
+                          {multiBox && a.box ? (
+                            <View style={s.boxTag}>
+                              <View style={[s.boxDot, { backgroundColor: boxColor(a.box) }]} />
+                              <Text style={s.boxTagText} numberOfLines={1}>{boxName(a.box)}</Text>
+                            </View>
+                          ) : null}
+                        </View>
                         <Text style={s.subject} numberOfLines={1}>{a.subject}</Text>
                       </View>
                       {a.why_now ? (
@@ -428,7 +441,15 @@ export function InboxScreen({
                              onLongPress={() => onLongPressItem?.({ type: "note", label: n.from_name, kind: n.kind || undefined, fromAddr: n.from_addr, noteId: n.id, why: n.gist, onResolved: () => dropNote(n.id) })} delayLongPress={350}>
                     <View style={s.noteDot} />
                     <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text style={s.noteFrom}>{n.from_name}</Text>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <Text style={[s.noteFrom, { flexShrink: 1 }]} numberOfLines={1}>{n.from_name}</Text>
+                        {multiBox && n.box ? (
+                          <View style={s.boxTag}>
+                            <View style={[s.boxDot, { backgroundColor: boxColor(n.box) }]} />
+                            <Text style={s.boxTagText} numberOfLines={1}>{boxName(n.box)}</Text>
+                          </View>
+                        ) : null}
+                      </View>
                       <Text style={s.noteGist} numberOfLines={open ? undefined : 2}>{n.gist || n.subject}</Text>
                       {open ? (
                         <>
@@ -589,6 +610,13 @@ const s = StyleSheet.create({
   },
   noteDot: { width: 7, height: 7, borderRadius: 4, marginTop: 5, backgroundColor: C.lav },
   noteFrom: { fontFamily: SANS_SEMI, fontSize: 12.5, color: C.text },
+  boxTag: {
+    flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0,
+    paddingHorizontal: 7, paddingVertical: 2, borderRadius: 100,
+    backgroundColor: "rgba(255,255,255,0.05)",
+  },
+  boxDot: { width: 6, height: 6, borderRadius: 3 },
+  boxTagText: { fontFamily: MONO, fontSize: 9, letterSpacing: 0.5, color: "rgba(244,242,250,0.6)", maxWidth: 90 },
   noteGist: { fontFamily: SANS, fontSize: 12, lineHeight: 17.5, color: "rgba(244,242,250,0.6)", marginTop: 3 },
   noteBody: { fontFamily: SANS, fontSize: 12, lineHeight: 18, color: "rgba(244,242,250,0.55)", marginTop: 10 },
   handled: {
