@@ -566,21 +566,37 @@ def profile_knows(user_id: str = Depends(current_user_id), db: Session = Depends
         "relationship": p.relationship or "", "summary": p.summary or "",
         "facts": p.facts or [],
     } for p in people]
-    # Beliefs Nano has formed about the user (not plumbing, not collections).
+    # Genuine learned beliefs — not plumbing, not the daily brief, not tokens.
+    _DENY = {"morning_brief", "reflection_brief", "heartbeat_state", "mutes",
+             "auto_reply_kinds", "reauth_needed", "expo_push_token",
+             "apns_device_token", "liveactivity_start_token",
+             "liveactivity_update_token"}
     facts = list(db.scalars(_select(UserFact).where(
-        UserFact.user_id == user_id,
-        UserFact.domain.in_(("identity", "goals", "inbox", "nutrition", "playbooks")))
-        .order_by(UserFact.confidence.desc(), UserFact.learned_at.desc()).limit(40)))
+        UserFact.user_id == user_id, UserFact.domain != "system")
+        .order_by(UserFact.confidence.desc(), UserFact.learned_at.desc()).limit(80)))
     fact_rows = []
     for f in facts:
+        if f.key in _DENY:
+            continue
+        keep = (f.domain in ("identity", "goals", "playbooks")
+                or f.key.startswith("reflected_")
+                or f.key in ("reply_style", "signature_name"))
+        if not keep:
+            continue
         v = f.value or {}
-        text = v.get("belief") or v.get("text") or v.get("notes") or ""
+        if f.domain == "playbooks":
+            text = (v.get("how") or v.get("when") or "").strip()
+        else:
+            text = (v.get("belief") or v.get("text") or v.get("notes")
+                    or v.get("name") or "").strip()
         if not text and isinstance(v, dict):
-            text = ", ".join(f"{k}: {vv}" for k, vv in list(v.items())[:2] if isinstance(vv, (str, int, float)))
+            text = ", ".join(f"{k}: {vv}" for k, vv in list(v.items())[:2]
+                             if isinstance(vv, (str, int, float)))
         if text:
             fact_rows.append({"domain": f.domain, "key": f.key,
                               "belief": str(text)[:200],
                               "learned_at": f.learned_at.isoformat()})
+    fact_rows = fact_rows[:40]
     return {
         "facets": [{"name": "People", "n": len(people_rows)},
                    {"name": "About you", "n": len(fact_rows)}],
