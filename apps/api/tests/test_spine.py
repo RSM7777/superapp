@@ -1451,6 +1451,57 @@ def test_enabling_autoreply_sends_the_waiting_draft():
         settings.gmail_scope_tier = prev
 
 
+def test_placeholder_drafts_never_auto_send():
+    """A draft still carrying a fill-in blank ([time], {date}, TBD) is not
+    finished writing. It may wait in the inbox for the user to edit, but no
+    auto-reply rule sends it, and an incoming [time] is never echoed back."""
+    import superapp.config as config_module
+
+    from superapp.models import InboxDraft, InboxMessage, utcnow
+    from superapp.policy import has_placeholder
+    from superapp.substrate.inbox import create_draft
+
+    assert has_placeholder("Sounds good, [time] works for me.")
+    assert has_placeholder("See you at {{place}} then")
+    assert has_placeholder("Let's say <insert time> tomorrow")
+    assert has_placeholder("Meeting at TBD, will confirm")
+    assert has_placeholder("Name: ______")
+    assert not has_placeholder("Sounds good. What time were you thinking?")
+    assert not has_placeholder("Per ref [1], the 7pm slot is open")
+    assert not has_placeholder("I'll be there at 6, see you then")
+
+    settings = config_module.get_settings()
+    prev = settings.gmail_scope_tier
+    settings.gmail_scope_tier = "send"
+    try:
+        db = SessionLocal()
+        m = InboxMessage(user_id="harshith", account_email="h@x.com",
+                         gmail_msg_id="ar-blank-1", thread_id="t-ar-blank",
+                         from_name="Sai Chetla", from_addr="sai@friends.example",
+                         subject="Re: Dinner",
+                         body_text="Tomorrow works for me, let's say [time].",
+                         tier="needs_reply", note_kind="blank dinner plans",
+                         received_at=utcnow())
+        db.add(m)
+        db.flush()
+        d = create_draft(db, user_id="harshith", message_id=m.id,
+                         body="Sounds good, [time] works for me.\n\nHarshith")
+        db.commit()
+        mid, did = m.id, d.id
+        db.close()
+
+        r = client.post("/v1/inbox/autoreply", headers=AUTH,
+                        json={"kind": "blank dinner plans"}).json()
+        assert r["sent_now"] == 0
+
+        db = SessionLocal()
+        assert db.get(InboxDraft, did).status == "waiting"
+        assert db.get(InboxMessage, mid).tier == "needs_reply"
+        db.close()
+    finally:
+        settings.gmail_scope_tier = prev
+
+
 def test_mailboxes_and_knows_and_box_on_messages():
     """Multi-mailbox surfaces: state carries a mailboxes list + per-message box,
     /inbox/mailboxes lists them, /profile/knows returns people + facts."""

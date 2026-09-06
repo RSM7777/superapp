@@ -401,7 +401,7 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
     from ..llm.provider import LLMProvider
     from ..models import InboxDraft, InboxMessage, utcnow
     from ..people import update_person
-    from ..policy import assess, draft_leaks_new_destination
+    from ..policy import assess, draft_leaks_new_destination, has_placeholder
 
     kind_l = (kind or "").strip().lower()
     sender_l = (sender or "").strip().lower()
@@ -423,6 +423,8 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
             continue  # a steering email never auto-sends, even on an explicit rule
         if not assess("inbox.auto_reply", provenance="user").allowed:
             continue
+        if has_placeholder(d.body):
+            continue  # a [time]-style blank is unfinished writing; the user fills it
         if draft_leaks_new_destination(d.body, msg.body_text or "",
                                        allowed=f"{msg.from_addr} {msg.account_email}"):
             continue

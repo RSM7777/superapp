@@ -90,8 +90,14 @@ DRAFT_SYSTEM = (
     "You draft email replies in the user's own voice. Use their reply-style "
     "notes and past edits. Short, warm, direct; no corporate filler, no "
     "sign-off longer than a first name. Answer the actual question; commit to "
-    "specifics when the user's context supports them, otherwise leave a clear "
-    "placeholder like [time]. NEVER invent names, facts, times, or commitments "
+    "specifics only when the email or the user's context supports them. When "
+    "a detail is missing (a time, a place, a number), ask for it in plain "
+    "words or say you'll go with whatever they suggest. NEVER write a "
+    "bracketed or templated blank such as [time], [name], {date}, <insert x> "
+    "or TBD; this reply goes out as written, nobody fills it in. If the "
+    "incoming email itself contains a placeholder like [time], treat that "
+    "detail as unspecified and ask what they meant; never repeat the token. "
+    "NEVER invent names, facts, times, or commitments "
     "not present in the email or the provided context. If you sign at all, "
     "sign exactly as you_are.name — no other name may appear as the sender. "
     "Write like a human typed it in thirty seconds: flowing sentences in one "
@@ -193,30 +199,46 @@ def _verify_clear(db: Session, context: ContextSlice, provider: LLMProvider, msg
 def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg) -> str:
     from ..substrate.facts import read_facts as _read_facts
 
+    from ..policy import has_placeholder
+
     style = _fact(context, "reply_style")
     # Who the user IS — without this the model invents a signature name.
     # Overridable via the inbox/signature_name fact; defaults to the user id.
     identity = _fact(context, "signature_name") or {}
     name = identity.get("name") or context.user_id.capitalize()
+    payload = {
+        "you_are": {"name": name, "email": msg.account_email},
+        "email": {"from_name": msg.from_name, "subject": msg.subject, "body": msg.body_text[:6000]},
+        "reply_style_notes": (style or {}).get("notes", ""),
+        "user_facts": [f for f in context.facts if f["domain"] in ("goals", "identity")],
+        "playbooks": [{"when": (f.value or {}).get("when", ""),
+                       "how": (f.value or {}).get("how", "")}
+                      for f in _read_facts(db, user_id=context.user_id,
+                                           domains=["playbooks"], limit=6)],
+    }
     resp = provider.complete(
         db, user_id=context.user_id, agent="inbox", task="reply_draft",
-        system=DRAFT_SYSTEM,
-        prompt=json.dumps({
-            "you_are": {"name": name, "email": msg.account_email},
-            "email": {"from_name": msg.from_name, "subject": msg.subject, "body": msg.body_text[:6000]},
-            "reply_style_notes": (style or {}).get("notes", ""),
-            "user_facts": [f for f in context.facts if f["domain"] in ("goals", "identity")],
-            "playbooks": [{"when": (f.value or {}).get("when", ""),
-                           "how": (f.value or {}).get("how", "")}
-                          for f in _read_facts(db, user_id=context.user_id,
-                                               domains=["playbooks"], limit=6)],
-        }, sort_keys=True),
+        system=DRAFT_SYSTEM, prompt=json.dumps(payload, sort_keys=True),
     )
     if resp.stubbed or resp.refused:
         first = msg.from_name.split()[0] if msg.from_name else "there"
         return (f"Hi {first} — got it, thanks for the nudge. Yes from my side; "
                 f"I'll confirm the details by tomorrow. (stub draft)")
-    return resp.text.strip()
+    text = resp.text.strip()
+    if has_placeholder(text):
+        # One rewrite with the blank called out; if it still slips through,
+        # the draft waits for the user and the auto-send gate refuses it.
+        payload["previous_draft"] = text
+        payload["fix"] = ("Your previous draft left a fill-in blank (like [time]). "
+                          "Rewrite it so nothing needs filling in: ask for the "
+                          "missing detail in plain words instead.")
+        again = provider.complete(
+            db, user_id=context.user_id, agent="inbox", task="reply_draft",
+            system=DRAFT_SYSTEM, prompt=json.dumps(payload, sort_keys=True),
+        )
+        if not (again.stubbed or again.refused) and again.text.strip():
+            text = again.text.strip()
+    return text
 
 
 def _auto_reply_match(db: Session, user_id: str, kind: str,
@@ -307,7 +329,8 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
             if msg is None:
                 continue
             counts["new"] += 1
-            from ..policy import assess, draft_leaks_new_destination, looks_like_injection
+            from ..policy import (assess, draft_leaks_new_destination, has_placeholder,
+                                  looks_like_injection)
             verdict = _triage_one(db, context, provider, msg)
             msg.tier = verdict["tier"]
             msg.gist = verdict["gist"][:250]
@@ -360,6 +383,7 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                         and settings.gmail_scope_tier in ("send", "modify")
                         and _auto_reply_match(db, context.user_id, msg.note_kind, msg.from_addr)
                         and gate.allowed
+                        and not has_placeholder(draft.body)
                         and not draft_leaks_new_destination(
                             draft.body, msg.body_text,
                             allowed=f"{msg.from_addr} {msg.account_email}")):

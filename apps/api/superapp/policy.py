@@ -117,3 +117,25 @@ def draft_leaks_new_destination(draft: str, source: str,
     if _SPELLED_RE.search(d):
         return True  # nobody spells out a domain in a genuine reply
     return False
+
+
+# A templated blank the drafter left for a human to fill: [time], {date},
+# <insert name>, TBD, ____. Numeric brackets ([1]) are citations, not blanks.
+_PLACEHOLDER_RE = re.compile(
+    r"\[(?![\d\s]+\])[^\[\]\n]{1,40}\]"
+    r"|\{\{?[^{}\n]{1,40}\}?\}"
+    r"|<\s*(?:insert|your|the|a)?\s*(?:time|date|day|name|place|location|spot|"
+    r"number|amount|link|address|company|details?|x+)\s*>"
+    r"|\b(?:TBD|TBA|TODO)\b"
+    r"|\b(?:insert|fill in)\s+(?:the\s+|a\s+|your\s+)?"
+    r"(?:time|date|day|name|place|number|amount|link|details?)\b"
+    r"|_{3,}",
+    re.IGNORECASE,
+)
+
+
+def has_placeholder(text: str) -> bool:
+    """True when a draft still carries a fill-in-the-blank token. Such a draft
+    is not finished writing: it may sit in the inbox for the user to edit, but
+    it never auto-sends, and the drafter is asked to rewrite it once first."""
+    return bool(_PLACEHOLDER_RE.search(text or ""))
