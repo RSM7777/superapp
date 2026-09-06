@@ -1698,3 +1698,64 @@ def test_drafter_neutralizes_senders_placeholders():
     # ...and if the drafter echoes the substitute, the auto-send gate still catches it
     from superapp.policy import has_placeholder
     assert has_placeholder("Sure, (not specified) works for me")
+
+
+
+def test_auto_reply_never_answers_an_auto_reply_and_caps_per_thread():
+    """Two assistants must not answer each other forever: our auto-replies
+    carry Auto-Submitted, inbound auto-submitted mail is flagged at parse
+    time, and a thread gets at most two auto-replies a day."""
+    import superapp.config as config_module
+
+    from superapp.inbox.gmail_client import GmailClient
+    from superapp.models import InboxDraft, InboxMessage, utcnow
+    from superapp.routers.inbox import send_matching_pending_drafts, set_auto_reply
+    from superapp.substrate.inbox import create_draft, replies_sent_in_thread
+
+    mime = GmailClient.build_reply(to_addr="a@b.example", subject="Dinner", body="ok", auto=True)
+    assert mime["Auto-Submitted"] == "auto-replied" and mime["X-Nano-Auto"] == "1"
+    assert GmailClient.build_reply(to_addr="a@b.example", subject="Dinner", body="ok").get("Auto-Submitted") is None
+    raw = {"id": "x1", "threadId": "t", "labelIds": ["INBOX"], "internalDate": "0", "snippet": "hi",
+           "payload": {"headers": [{"name": "From", "value": "Sai <sai@x.example>"},
+                                   {"name": "Auto-Submitted", "value": "auto-replied"}],
+                       "mimeType": "text/plain", "body": {"data": "aGk="}}}
+    assert GmailClient()._parse(raw)["auto_submitted"] is True
+    raw["payload"]["headers"].pop()
+    assert GmailClient()._parse(raw)["auto_submitted"] is False
+
+    settings = config_module.get_settings()
+    prev = settings.gmail_scope_tier
+    settings.gmail_scope_tier = "send"
+    try:
+        db = SessionLocal()
+        tid = "t-loop-1"
+        # two replies already went out on this thread today
+        for i in range(2):
+            m = InboxMessage(user_id="harshith", account_email="h@x.com",
+                             gmail_msg_id=f"loop-{i}", thread_id=tid, from_name="Loop Bot",
+                             from_addr="bot@loop.example", subject="Re: ping", body_text="ping?",
+                             tier="worth_knowing", note_kind="ping pong", received_at=utcnow())
+            db.add(m)
+            db.flush()
+            d = create_draft(db, user_id="harshith", message_id=m.id, body="pong")
+            d.status = "sent"
+            d.sent_at = utcnow()
+        db.commit()
+        assert replies_sent_in_thread(db, user_id="harshith", thread_id=tid) == 2
+        m = InboxMessage(user_id="harshith", account_email="h@x.com",
+                         gmail_msg_id="loop-3", thread_id=tid, from_name="Loop Bot",
+                         from_addr="bot@loop.example", subject="Re: ping", body_text="ping again?",
+                         tier="needs_reply", note_kind="ping pong", received_at=utcnow())
+        db.add(m)
+        db.flush()
+        d = create_draft(db, user_id="harshith", message_id=m.id, body="pong again")
+        db.commit()
+        set_auto_reply(db, "harshith", sender="bot@loop.example", on=True)
+        assert send_matching_pending_drafts(db, "harshith", sender="bot@loop.example") == 0
+        db.commit()
+        assert db.get(InboxDraft, d.id).status == "waiting"
+        set_auto_reply(db, "harshith", sender="bot@loop.example", on=False)
+        db.commit()
+        db.close()
+    finally:
+        settings.gmail_scope_tier = prev

@@ -200,3 +200,25 @@ def sender_matches(rules: set, from_addr: str) -> bool:
 def rule_matches(rules: dict, from_addr: str, kind: str) -> bool:
     k = (kind or "").lower().strip()
     return sender_matches(rules["senders"], from_addr) or bool(k and k in rules["kinds"])
+
+
+def replies_sent_in_thread(db, *, user_id: str, thread_id: str, hours: int = 24) -> int:
+    """How many replies went out on this thread recently. The auto-reply loop
+    backstop: two assistants answering each other stop after two rounds, and
+    a thread the person is actively working stays theirs."""
+    from datetime import timedelta
+
+    from sqlalchemy import func
+
+    from ..models import InboxDraft, InboxMessage, utcnow
+    if not thread_id:
+        return 0
+    cutoff = utcnow() - timedelta(hours=hours)
+    return db.scalar(
+        select(func.count()).select_from(InboxDraft)
+        .join(InboxMessage, InboxMessage.id == InboxDraft.message_id)
+        .where(InboxDraft.user_id == user_id, InboxDraft.status == "sent",
+               InboxDraft.sent_at >= cutoff, InboxMessage.thread_id == thread_id)) or 0
+
+
+AUTO_REPLIES_PER_THREAD = 2

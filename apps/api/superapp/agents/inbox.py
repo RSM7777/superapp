@@ -33,7 +33,8 @@ from ..sdui.blocks import (
 )
 from ..substrate import ContextSlice
 from ..substrate.events import recent_events
-from ..substrate.inbox import accounts, create_draft, insert_message
+from ..substrate.inbox import (accounts, create_draft, insert_message,
+    AUTO_REPLIES_PER_THREAD, replies_sent_in_thread)
 from ..vault import get_token
 from ..kernel import record_decision
 from .base import EventWrite, FactWrite, ThinkResult, register_agent
@@ -411,6 +412,9 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                         and _auto_reply_match(db, context.user_id, msg.note_kind, msg.from_addr)
                         and gate.allowed
                         and not promoted  # a rule surfaced it; the model saw no ask to answer
+                        and not raw.get("auto_submitted")  # never answer an auto-reply
+                        and replies_sent_in_thread(db, user_id=context.user_id,
+                                                   thread_id=msg.thread_id) < AUTO_REPLIES_PER_THREAD
                         and not has_placeholder(draft.body)
                         and not draft_leaks_new_destination(
                             draft.body, msg.body_text,
@@ -427,7 +431,7 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                     try:
                         sent_id = client.send_reply(
                             to_addr=msg.from_addr, subject=msg.subject,
-                            body=draft.body, thread_id=msg.thread_id)
+                            body=draft.body, thread_id=msg.thread_id, auto=True)
                         _la(db, user_id=context.user_id, event="end",
                             state={"status": "Sent.",
                                    "stage": f"Sent to {msg.from_name}.",

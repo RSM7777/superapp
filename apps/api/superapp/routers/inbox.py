@@ -405,6 +405,7 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
     from ..models import InboxDraft, InboxMessage, utcnow
     from ..people import update_person
     from ..policy import assess, draft_leaks_new_destination, has_placeholder
+    from ..substrate.inbox import AUTO_REPLIES_PER_THREAD, replies_sent_in_thread
 
     kind_l = (kind or "").strip().lower()
     sender_l = (sender or "").strip().lower()
@@ -426,6 +427,9 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
             continue  # a steering email never auto-sends, even on an explicit rule
         if getattr(msg, "rule_promoted", False):
             continue  # a "never miss" rule surfaced it; the model saw no ask to answer
+        if replies_sent_in_thread(db, user_id=user_id,
+                                  thread_id=msg.thread_id) >= AUTO_REPLIES_PER_THREAD:
+            continue  # the loop backstop: this thread has had its auto-replies today
         if not assess("inbox.auto_reply", provenance="user").allowed:
             continue
         if has_placeholder(d.body):
@@ -437,7 +441,7 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
         client = GmailClient(json.loads(token) if token else None)
         try:
             sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
-                                        body=d.body, thread_id=msg.thread_id)
+                                        body=d.body, thread_id=msg.thread_id, auto=True)
         except Exception:  # noqa: BLE001
             continue
         d.status = "sent"

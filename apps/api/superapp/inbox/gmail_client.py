@@ -222,10 +222,14 @@ class GmailClient:
             body = part_text(payload, "text/html")
         body = _html_to_text(body) or raw.get("snippet", "")
 
+        # RFC 3834: mail that announces itself as automatic (our own auto-replies
+        # included) must never be auto-answered, or two assistants loop forever.
+        auto_sub = headers.get("auto-submitted", "").strip().lower()
         return {
             "gmail_msg_id": raw["id"], "thread_id": raw.get("threadId", ""),
             "from_name": name or addr, "from_addr": addr,
             "subject": headers.get("subject", ""),
+            "auto_submitted": (auto_sub not in ("", "no")) or headers.get("x-nano-auto", "") == "1",
             "body_text": body[:MAX_BODY_CHARS],
             "received_at": datetime.fromtimestamp(
                 int(raw.get("internalDate", 0)) / 1000, tz=timezone.utc
@@ -233,14 +237,24 @@ class GmailClient:
         }
 
     # -- actions -------------------------------------------------------------
-    def send_reply(self, *, to_addr: str, subject: str, body: str, thread_id: str) -> str:
+    def send_reply(self, *, to_addr: str, subject: str, body: str, thread_id: str,
+                   auto: bool = False) -> str:
         if self.stubbed:
             return f"stub-sent-{int(time.time())}"
+        mime = self.build_reply(to_addr=to_addr, subject=subject, body=body, auto=auto)
+        raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+        return self._post("/messages/send", {"raw": raw, "threadId": thread_id})["id"]
+
+    @staticmethod
+    def build_reply(*, to_addr: str, subject: str, body: str, auto: bool = False) -> MIMEText:
         mime = MIMEText(body)
         mime["To"] = to_addr
         mime["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
-        raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
-        return self._post("/messages/send", {"raw": raw, "threadId": thread_id})["id"]
+        if auto:
+            # Declared so the other side's assistant (ours included) leaves it alone.
+            mime["Auto-Submitted"] = "auto-replied"
+            mime["X-Nano-Auto"] = "1"
+        return mime
 
     def send_new(self, *, to_addr: str, subject: str, body: str) -> str:
         if self.stubbed:
