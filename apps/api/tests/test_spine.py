@@ -1450,3 +1450,33 @@ def test_enabling_autoreply_sends_the_waiting_draft():
     finally:
         settings.gmail_scope_tier = prev
 
+
+def test_mailboxes_and_knows_and_box_on_messages():
+    """Multi-mailbox surfaces: state carries a mailboxes list + per-message box,
+    /inbox/mailboxes lists them, /profile/knows returns people + facts."""
+    from superapp.models import InboxMessage, utcnow
+
+    db = SessionLocal()
+    db.add(InboxMessage(user_id="harshith", account_email="h@x.com",
+                        gmail_msg_id="box-1", thread_id="t-box",
+                        from_name="Someone", from_addr="s@x.com",
+                        subject="hi", body_text="hi there",
+                        tier="worth_knowing", received_at=utcnow()))
+    db.commit()
+    db.close()
+
+    st = client.get("/v1/inbox/state", headers=AUTH).json()
+    assert "mailboxes" in st
+    # every worth_knowing row carries the mailbox it came from
+    boxed = [n for n in st["worth_knowing"] if n.get("box")]
+    assert boxed and all("box" in n for n in st["worth_knowing"])
+
+    mb = client.get("/v1/inbox/mailboxes", headers=AUTH).json()["mailboxes"]
+    assert isinstance(mb, list)
+    if mb:
+        assert {"email", "primary", "color", "count"} <= mb[0].keys()
+
+    knows = client.get("/v1/profile/knows", headers=AUTH).json()
+    assert {"facets", "people", "facts"} <= knows.keys()
+    assert any(f["name"] == "People" for f in knows["facets"])
+

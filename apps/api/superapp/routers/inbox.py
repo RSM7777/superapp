@@ -281,6 +281,7 @@ def inbox_state(user_id: str = Depends(current_user_id), db: Session = Depends(g
 
     return {
         "connected": data.get("connected", False),
+        "mailboxes": data.get("mailboxes", []),
         "reauth": reauth,
         "auto_reply_kinds": auto_kinds,
         "auto_reply_senders": auto_senders,
@@ -542,3 +543,47 @@ def clear_notes(user_id: str = Depends(current_user_id), db: Session = Depends(g
                  domain="inbox", payload={"count": n})
     db.commit()
     return {"cleared": n}
+
+
+@router.get("/inbox/mailboxes")
+def list_mailboxes(user_id: str = Depends(current_user_id), db: Session = Depends(get_db)):
+    """The connected mailboxes, for the profile page — link as many as you like."""
+    from ..substrate.inbox import inbox_context
+    data = inbox_context(db, user_id)
+    return {"mailboxes": data.get("mailboxes", [])}
+
+
+@router.get("/profile/knows")
+def profile_knows(user_id: str = Depends(current_user_id), db: Session = Depends(get_db)):
+    """'What Nano knows' — the people it has learned, and what it knows about you."""
+    from sqlalchemy import select as _select
+
+    from ..models import Person, UserFact
+    people = list(db.scalars(_select(Person).where(Person.user_id == user_id)
+                             .order_by(Person.email_count.desc()).limit(40)))
+    people_rows = [{
+        "name": p.name or p.email, "email": p.email,
+        "relationship": p.relationship or "", "summary": p.summary or "",
+        "facts": p.facts or [],
+    } for p in people]
+    # Beliefs Nano has formed about the user (not plumbing, not collections).
+    facts = list(db.scalars(_select(UserFact).where(
+        UserFact.user_id == user_id,
+        UserFact.domain.in_(("identity", "goals", "inbox", "nutrition", "playbooks")))
+        .order_by(UserFact.confidence.desc(), UserFact.learned_at.desc()).limit(40)))
+    fact_rows = []
+    for f in facts:
+        v = f.value or {}
+        text = v.get("belief") or v.get("text") or v.get("notes") or ""
+        if not text and isinstance(v, dict):
+            text = ", ".join(f"{k}: {vv}" for k, vv in list(v.items())[:2] if isinstance(vv, (str, int, float)))
+        if text:
+            fact_rows.append({"domain": f.domain, "key": f.key,
+                              "belief": str(text)[:200],
+                              "learned_at": f.learned_at.isoformat()})
+    return {
+        "facets": [{"name": "People", "n": len(people_rows)},
+                   {"name": "About you", "n": len(fact_rows)}],
+        "people": people_rows,
+        "facts": fact_rows,
+    }

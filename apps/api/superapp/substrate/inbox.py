@@ -76,6 +76,7 @@ def inbox_context(db: Session, user_id: str) -> dict:
         deferred = bool(d and d.defer_until and aware(d.defer_until) > now)
         return {
             "id": m.id, "from_name": m.from_name, "from_addr": m.from_addr,
+            "box": m.account_email,
             "subject": m.subject, "gist": m.gist, "why_now": m.why_now,
             "clear_reason": m.clear_reason, "tier": m.tier, "settled": m.settled,
             "kind": getattr(m, "note_kind", "") or "",
@@ -142,8 +143,17 @@ def inbox_context(db: Session, user_id: str) -> dict:
         r["body"] = r["body"][:1500]
         primary.append(r)
 
+    _BOX_COLORS = ["#818CF8", "#7CF7C4", "#FF9DA8", "#FFD9A0", "#C7B8FF", "#5E7CFF"]
+    _accts = accounts(db, user_id)
+    mailboxes = [{
+        "email": a.email,
+        "primary": i == 0,
+        "color": _BOX_COLORS[i % len(_BOX_COLORS)],
+        "count": sum(1 for m in msgs if m.account_email == a.email),
+    } for i, a in enumerate(_accts)]
     return {
-        "connected": bool(accounts(db, user_id)),
+        "connected": bool(_accts),
+        "mailboxes": mailboxes,
         "needs_reply": open_asks,
         "primary": primary,
         "worth_knowing": [row(m) for m in msgs

@@ -674,6 +674,7 @@ function App() {
             auth={AUTH}
             userName={USER_NAME || (screen?.title?.match(/, (.+)\.$/)?.[1] ?? "")}
             onSignOut={signOut}
+            onChanged={() => load()}
           />
         </View>
       ) : null}
