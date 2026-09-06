@@ -12,7 +12,6 @@ import {
   Animated,
   Linking,
   PanResponder,
-  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -20,6 +19,7 @@ import {
   View,
 } from "react-native";
 
+import { Pressable } from "./ui/Tap";
 const C = {
   text: "#F4F2FA", muted: "#8A87A3", lav: "#C7B8FF", mint: "#7CF7C4",
   rose: "#FF9DA8",

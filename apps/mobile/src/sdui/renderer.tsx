@@ -2,7 +2,8 @@
 // content; how they look was decided once, here. Adding a component to the
 // registry = adding a case to this switch + a type in types.ts + blocks.py.
 import React, { useState } from "react";
-import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Image, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Pressable } from "../ui/Tap";
 import { LinearGradient } from "expo-linear-gradient";
 import Svg, { Circle } from "react-native-svg";
 import type { LeafBlock, Screen, Section } from "./types";

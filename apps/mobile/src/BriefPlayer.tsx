@@ -11,10 +11,11 @@ import {
 } from "expo-speech-recognition";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator, Animated, Easing, Pressable, ScrollView, StyleSheet,
+  ActivityIndicator, Animated, Easing, ScrollView, StyleSheet,
   Text, View,
 } from "react-native";
 
+import { Pressable } from "./ui/Tap";
 const T = "#F4F2FA";
 const MONO = "JetBrainsMono_400Regular";
 const SERIF = "InstrumentSerif_400Regular";
@@ -150,6 +151,14 @@ export function BriefPlayer({
     else setIdx(idx + 1);
   }, [idx, segments, onClose, player, stopListening]);
 
+  const prev = useCallback(() => {
+    stopListening();
+    try { player.pause(); } catch { /* fine */ }
+    if (idx > 0) setIdx(idx - 1);
+    else if (seg) setSpoken({ text: seg.say, id: `seg-0-r${Date.now()}`, isAnswer: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idx, player, stopListening, seg]);
+
   const startListening = useCallback(async () => {
     if (!voiceOn) return;
     try {
@@ -166,47 +175,75 @@ export function BriefPlayer({
   }, [voiceOn]);
 
   // Nano answers a question spoken during the brief, then hands back the ear.
+  // The segment on screen rides along as `focus` so "that email" / "tell me
+  // more" resolve to what is actually being read, not the inbox at large.
   const converse = useCallback(async (text: string) => {
     setPhase("thinking");
     chatHist.current = [...chatHist.current, { role: "user" as const, text }].slice(-12);
+    const focus = seg
+      ? {
+          segment: seg.agent, heading: seg.head, just_said: seg.say,
+          position: `${idx + 1} of ${segments?.length ?? 1}`,
+          mail: (seg.mailRows ?? []).map((m) => ({ from: m.from, subject: m.sub, why: m.chip })),
+          notes: (seg.noteRows ?? []).map((n) => ({ from: n.from, gist: n.gist })),
+        }
+      : null;
     try {
       const res = await fetch(`${apiUrl}/v1/voice/converse`, {
         method: "POST", headers: { ...auth, "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: chatHist.current }),
+        body: JSON.stringify({ messages: chatHist.current, focus }),
       });
       const r = await res.json();
-      const reply = r.say || "Say that once more?";
-      chatHist.current = [...chatHist.current, { role: "nano" as const, text: reply }];
+      const reply = r.say || "";
+      if (reply) chatHist.current = [...chatHist.current, { role: "nano" as const, text: reply }];
+      // Nano decides what the words meant — including moving through the
+      // brief. The client never guesses at intent.
+      if (r.action === "next_segment") return next();
+      if (r.action === "previous_segment") return prev();
+      if (r.action === "repeat_segment") {
+        if (seg) setSpoken({ text: seg.say, id: `seg-${idx}-r${Date.now()}`, isAnswer: false });
+        return;
+      }
       if (r.action === "open_screen" || r.action === "refresh_inbox") { onClose(); onOpenInbox(); return; }
-      setSpoken({ text: reply, id: `ans-${chatHist.current.length}`, isAnswer: true });
+      if (r.action === "end_conversation") { onClose(); return; }
+      setSpoken({ text: reply || "Say that once more?", id: `ans-${chatHist.current.length}`, isAnswer: true });
     } catch {
+      // Offline or stubbed: the brief still has to be steerable, so fall back
+      // to the crudest reading of the words. Never the primary path.
+      const t = text.trim().toLowerCase();
+      if (/\b(next|skip|move on|go on|what else)\b/.test(t)) return next();
+      if (/\b(back|previous)\b/.test(t)) return prev();
+      if (/\b(stop|close|done|quit|that'?s all)\b/.test(t)) return onClose();
       setSpoken({ text: "I couldn't reach the server just now. One more time?", id: `ans-err-${Date.now()}`, isAnswer: true });
     }
-  }, [apiUrl, auth, onClose, onOpenInbox]);
+  }, [apiUrl, auth, onClose, onOpenInbox, next, prev, seg, idx, segments]);
 
-  // What the user said while Nano was listening: a command, or a question.
+  // What the person said while Nano was listening. It is not parsed here —
+  // it is only screened for Nano's own echo and then handed to the brain.
   const handleUtterance = useCallback((text: string) => {
     const t = text.trim().toLowerCase();
     if (!t) { startListening(); return; }
     // Echo guard: if the mic caught the tail of Nano's own voice (a long
     // phrase that mostly overlaps what it just said), ignore it and keep
     // listening — never answer yourself.
+    // ...but never let the echo guard eat a real question. Nano narrates in
+    // statements; the person asks. A question that happens to reuse Nano's
+    // words ("anything else from Marcus?") is not an echo.
+    const asking = t.endsWith("?") || /^(who|what|when|where|why|how|which|whose|do|does|did|can|could|would|should|is|are|was|were|any|anything|tell|read|remind|give)\b/.test(t);
     const words = t.split(/\s+/).filter(Boolean);
-    if (words.length >= 3) {
+    if (!asking && words.length >= 3) {
       const said = new Set(lastSpokenRef.current.split(/\s+/));
       const overlap = words.filter((w) => said.has(w)).length / words.length;
       if (overlap > 0.6) { startListening(); return; }
     }
     stopListening();
-    if (/\b(next|skip|continue|go on|move on|keep going|carry on)\b/.test(t)) return next();
-    if (/\b(open|show|drafts?|inbox|read them|take me|let'?s see)\b/.test(t)) { onClose(); onOpenInbox(); return; }
-    if (/\b(close|stop|exit|done|quit|dismiss|that'?s all|i'?m good)\b/.test(t)) return onClose();
-    if (/\b(repeat|again|say that again|one more time)\b/.test(t) && seg) {
-      setSpoken({ text: seg.say, id: `seg-${idx}-r${Date.now()}`, isAnswer: false });
-      return;
-    }
+    // Everything goes to Nano. There is no client-side command vocabulary:
+    // "go next", "what else", "skip this bit", "don't show me Amazon updates"
+    // and "what was the update on the lease" are all just things a person
+    // said, and the brain decides what they meant. The only local shortcuts
+    // left are the offline fallback inside converse().
     converse(text);
-  }, [next, converse, onClose, onOpenInbox, startListening, stopListening, seg, idx]);
+  }, [converse, startListening, stopListening]);
 
   useEffect(() => { handleRef.current = handleUtterance; }, [handleUtterance]);
 

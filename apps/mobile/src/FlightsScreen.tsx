@@ -4,12 +4,12 @@
 // work identically here and by voice.
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { NativeModules } from "react-native";
+import { Pressable } from "./ui/Tap";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Linking,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,

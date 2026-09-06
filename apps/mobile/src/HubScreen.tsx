@@ -4,8 +4,9 @@
 // the existing /v1/screen/hub SDUI payload; presentation is native.
 import { LinearGradient } from "expo-linear-gradient";
 import React, { useMemo } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 
+import { Pressable } from "./ui/Tap";
 import type {
   Action, ActionRow, AgentCard, AgentGrid, Screen as SduiScreenT, TextBlock,
 } from "./sdui/types";

@@ -8,7 +8,6 @@ import {
   Alert,
   Dimensions,
   Modal,
-  Pressable,
   TextInput,
   RefreshControl,
   ScrollView,
@@ -16,6 +15,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { Pressable } from "./ui/Tap";
 import { LinearGradient } from "expo-linear-gradient";
 import * as ImagePicker from "expo-image-picker";
 import Svg, { Circle } from "react-native-svg";

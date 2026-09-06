@@ -40,6 +40,33 @@ CONVERSE_SYSTEM = (
     "When they ask what needs attention: tell them concretely — who wrote, "
     "what they want, that your reply is already drafted — then offer the next "
     "step (read it, change it, send it).\n"
+    "THE BRIEFING: when `focus.segment` is set you are reading the morning "
+    "brief aloud and they can steer it in any words they like. Move on when "
+    "they signal it however they phrase it (\"next\", \"go next\", \"yeah "
+    "skip this\", \"what else\", \"move on\"): action=next_segment. Back up: "
+    "action=previous_segment. Say it again: action=repeat_segment. For those "
+    "three keep `say` SHORT or empty — the next segment speaks for itself. "
+    "Any real question, even mid-brief, you answer in place with "
+    "action=none and listen=true; do NOT skip ahead just because they spoke.\n"
+    "NEVER MISS: \"I don't want to miss anything from X\", \"always show me "
+    "Y\", \"flag anything from Z\", \"put those in Needs you\" is a standing "
+    "promise: action=priority_mail. Prefer priority_sender as a bare DOMAIN "
+    "(\"amazon.com\") — it catches every address they send from. NEVER invent "
+    "a specific address like support@amazon.com; a guessed address looks "
+    "precise and then silently never matches. Use priority_kind only when "
+    "they describe a stream rather than a sender. Read the rule back in one "
+    "line so a wrong guess is caught now, not in three weeks.\n"
+    "STANDING RULES: \"don't show me X\", \"stop bringing me Y\", \"I never "
+    "want mail from Z\" is a durable filter, not a one-off: "
+    "action=mute_mail with mute_kind (a description like \"Amazon shipping "
+    "updates\") or mute_sender (an address). Confirm it out loud in one line.\n"
+    "FOCUS: when `focus` is present it is what they are looking at and "
+    "hearing right now — the briefing segment being read and the mail on "
+    "screen. Resolve every vague reference against it first: \"that email\", "
+    "\"this one\", \"them\", \"who was that\", \"tell me more\" mean the item in "
+    "`focus`, not the inbox at large. If they ask for more about it, give the "
+    "substance you have on THAT message. Never answer a focused question with "
+    "a summary of everything.\n"
     "When they ask you to read a draft or an email: read the substance aloud, "
     "compressed, not verbatim boilerplate.\n"
     "When they ask you to change or write a reply: action=draft_reply with "
@@ -136,7 +163,9 @@ CONVERSE_SCHEMA = {
                         "enum": ["none", "open_screen", "refresh_inbox", "start_interview",
                                  "draft_reply", "send_draft", "send_new_email",
                                  "set_nutrition", "log_water", "research_task",
-                                 "connect_site", "auto_reply_rule", "end_conversation"]},
+                                 "connect_site", "auto_reply_rule", "end_conversation",
+                                 "next_segment", "previous_segment", "repeat_segment",
+                                 "mute_mail", "priority_mail"]},
         "screen": {"type": "string", "enum": ["hub", "inbox", "home", "finance", "stylist", "flights", ""]},
         "draft_id": {"type": "string"},
         "message_id": {"type": "string"},
@@ -144,10 +173,20 @@ CONVERSE_SCHEMA = {
         "to_addr": {"type": "string"},
         "subject": {"type": "string"},
         "profile_json": {"type": "string"},
+        # mute_mail: a standing filter. "stop showing me Amazon shipping mail"
+        # -> mute_kind; "nothing from this sender again" -> mute_sender.
+        "mute_kind": {"type": "string"},
+        "mute_sender": {"type": "string"},
+        # priority_mail: the opposite promise. "Don't let me miss anything
+        # from Amazon support" -> priority_sender "amazon.com" (a domain, not
+        # a guessed address), or priority_kind for a described stream.
+        "priority_kind": {"type": "string"},
+        "priority_sender": {"type": "string"},
         "listen": {"type": "boolean"},
     },
     "required": ["say", "action_type", "screen", "draft_id", "message_id", "reply_body",
-                 "to_addr", "subject", "profile_json", "listen"],
+                 "to_addr", "subject", "profile_json", "mute_kind", "mute_sender",
+                 "priority_kind", "priority_sender", "listen"],
     "additionalProperties": False,
 }
 
@@ -159,6 +198,11 @@ class Turn(BaseModel):
 
 class ConverseBody(BaseModel):
     messages: list[Turn] = Field(min_length=1, max_length=40)
+    # What the person is looking at / listening to right now (the briefing
+    # segment and the mail on screen). Optional: older app builds omit it.
+    # Deictic questions — "that email", "this one", "read them" — resolve
+    # against this instead of guessing at the whole inbox.
+    focus: dict | None = None
 
 
 def _playbooks(db, user_id: str) -> list[dict]:
@@ -312,6 +356,41 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
         append_event(db, user_id=user_id, type="nutrition_plan_set", agent="orb",
                      domain="nutrition", payload={k: plan[k] for k in ("kcal", "goal")})
         return {}
+    if action == "priority_mail":
+        # "Never let me miss X." Stored as a standing rule and enforced in
+        # triage, so it cannot be quietly forgotten on a later run.
+        from ..routers.inbox import PriorityBody
+        from ..routers.inbox import priority as _priority
+        kind = (parsed.get("priority_kind") or "").strip()
+        sender = (parsed.get("priority_sender") or "").strip()
+        if not kind and not sender:
+            return {"say": "Who or what should I always put in front of you?"}
+        _priority(PriorityBody(kind=kind or None, sender=sender or None),
+                  user_id=user_id, db=db)
+        record_decision(db, user_id=user_id, agent="inbox",
+                        action_key="inbox.priority", decided_by="user", verdict="accepted",
+                        payload={"kind": kind, "sender": sender})
+        who = sender or kind
+        return {"say": f"Done — anything from {who} goes straight to Needs you "
+                       "from now on, with a reply already written. Say the word "
+                       "if that turns out to be too much."}
+
+    if action == "mute_mail":
+        # "Don't show me Amazon shipping updates" / "nothing from this sender".
+        # A standing filter: the mail still syncs, it just files itself away.
+        from ..routers.inbox import MuteBody
+        from ..routers.inbox import mute as _mute
+        kind = (parsed.get("mute_kind") or "").strip()
+        sender = (parsed.get("mute_sender") or "").strip()
+        if not kind and not sender:
+            return {"say": "What should I stop putting in front of you?"}
+        _mute(MuteBody(kind=kind or None, sender=sender or None), user_id=user_id, db=db)
+        record_decision(db, user_id=user_id, agent="inbox",
+                        action_key="inbox.mute", decided_by="user", verdict="accepted",
+                        payload={"kind": kind, "sender": sender})
+        return {"say": f"Done. {kind or sender} won't come to you again — "
+                       "it'll file itself under handled."}
+
     if action == "auto_reply_rule":
         from ..routers.inbox import set_auto_reply
         addr = (parsed.get("to_addr") or "").strip()
@@ -574,6 +653,7 @@ def converse(body: ConverseBody, user_id: str = Depends(current_user_id),
         system=CONVERSE_SYSTEM,
         prompt=json.dumps({
             "conversation": [t.model_dump() for t in body.messages[-16:]],
+            "focus": body.focus or {},
             "inbox": voice_inbox,
             "nutrition": _nutrition_for_voice(context),
             "scout_tasks": _tasks_for_voice(db, user_id),

@@ -6,9 +6,10 @@
 // happens right here in the same conversation — no screen switch.
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Animated, Easing, Keyboard, Platform, Pressable, ScrollView, StyleSheet,
+  Animated, Easing, Keyboard, Platform, ScrollView, StyleSheet,
   Text, TextInput, View,
 } from "react-native";
+import { Pressable } from "./ui/Tap";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
