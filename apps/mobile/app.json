@@ -28,6 +28,13 @@
           "microphonePermission": "Nano listens while you answer its interview questions.",
           "speechRecognitionPermission": "Your spoken answers are transcribed on this device."
         }
+      ],
+      [
+        "@kingstinct/react-native-healthkit",
+        {
+          "NSHealthShareUsageDescription": "Nano reads your steps and active energy so calorie targets reflect what you actually burned.",
+          "NSHealthUpdateUsageDescription": "Nano writes meals you log back to Health so your rings stay accurate."
+        }
       ]
     ]
   }

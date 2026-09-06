@@ -6,13 +6,13 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Linking,
-  Pressable,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
 
+import { Pressable } from "./ui/Tap";
 type ShortlistItem = {
   title?: string;
   price?: string;

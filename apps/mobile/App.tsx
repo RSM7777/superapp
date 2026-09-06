@@ -15,7 +15,6 @@ import {
   ActivityIndicator,
   Alert,
   NativeModules,
-  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -23,6 +22,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { Pressable } from "./src/ui/Tap";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { ConversationProvider } from "@elevenlabs/react-native";
 import {
