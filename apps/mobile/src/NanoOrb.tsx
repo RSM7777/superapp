@@ -76,6 +76,8 @@ export function NanoOrb({
   const [chatWork, setChatWork] = useState<string | null>(null);
   const [chatReply, setChatReply] = useState<string | null>(null);
   const chatHist = useRef<ConverseTurn[]>([]);
+  const voiceCtxRef = useRef<DockContext | null>(null);
+  const ctxRef = useRef<DockContext | null>(null);
   // The stage: full-screen conversation surface with live captions —
   // same session as the edge ball, bigger presence.
   const [stage, setStage] = useState(false);
@@ -101,6 +103,7 @@ export function NanoOrb({
   const glide = useRef(new Animated.Value(0)).current;
   const breath = useRef(new Animated.Value(0)).current;
 
+  useEffect(() => { ctxRef.current = ctx; }, [ctx]);
   const player = useAudioPlayer(sayUrl ? { uri: sayUrl, headers: auth } : null);
   useEffect(() => {
     if (sayUrl) {
@@ -191,6 +194,7 @@ export function NanoOrb({
       setChatReply(null);
       setDockMode("voice");
       chatHist.current = [];
+      voiceCtxRef.current = null;
       mode.current = "converse";
       interviewSession.current = null;
     });
@@ -263,7 +267,10 @@ export function NanoOrb({
         return;
       }
 
-      history.current = [...history.current, { role: "user" as const, text }].slice(-24);
+      const framed = voiceCtxRef.current
+        ? `About the ${voiceCtxRef.current.type === "note" ? "note" : "email"} from ${voiceCtxRef.current.label}: ${text}`
+        : text;
+      history.current = [...history.current, { role: "user" as const, text: framed }].slice(-24);
       try {
         const res = await fetch(`${apiUrl}/v1/voice/converse`, {
           method: "POST",
@@ -383,6 +390,7 @@ export function NanoOrb({
     reconnected.current = false;
     emptyListens.current = 0;
     history.current = [];
+    voiceCtxRef.current = null;
     setDockMode("voice");
     setOpen(true);
     Animated.timing(glide, {
@@ -402,6 +410,26 @@ export function NanoOrb({
     listen();
   }, [apiUrl, auth, listen, speakThen, startRealtime]);
 
+  // Long-pressed an item, then tapped the orb: come to voice ABOUT that item
+  // and ask what to do with it — not the whole-inbox brief. Turn-based (not
+  // realtime) so the subject stays framed on every turn.
+  const startScopedVoice = useCallback((c: DockContext) => {
+    voiceCtxRef.current = c;
+    setChatReply(null);
+    setChatWork(null);
+    setDockMode("voice");
+    openRef.current = true;
+    reconnected.current = false;
+    history.current = [];
+    setOpen(true);
+    Animated.timing(glide, {
+      toValue: 1, duration: 460, easing: Easing.out(Easing.back(1.4)), useNativeDriver: true,
+    }).start();
+    const kind = c.type === "note" ? "note" : "email";
+    speakThen(`The ${kind} from ${c.label}. What would you like me to do with it?`,
+              null, "listen");
+  }, [speakThen]);
+
   // The app can summon Nano (e.g. "Set up with Nano" on the nutrition screen).
   useEffect(() => {
     if (openSignal && !openRef.current) openOrb();
@@ -411,9 +439,12 @@ export function NanoOrb({
     if (!stageSignal) return;
     // Tapping the ball mid-session restarts it fresh — the honest cure for
     // \"it stopped hearing me\": tear everything down, come back listening.
+    const held = ctxRef.current;
     if (openRef.current) {
       collapseRef.current();
-      setTimeout(() => openOrb(), 350);
+      setTimeout(() => (held ? startScopedVoice(held) : openOrb()), 350);
+    } else if (held) {
+      startScopedVoice(held);
     } else {
       openOrb();
     }
@@ -499,11 +530,12 @@ export function NanoOrb({
 
   // Switch chat → voice: hand off to the live mic session, keeping the dock up.
   const goVoice = useCallback(() => {
+    if (ctx) { startScopedVoice(ctx); return; }
     setDockMode("voice");
     setChatReply(null);
     setChatWork(null);
     openOrb();
-  }, [openOrb]);
+  }, [ctx, openOrb, startScopedVoice]);
 
   // Switch voice → chat: drop the mic session, stay open as a text thread.
   const goChat = useCallback(() => {
