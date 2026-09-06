@@ -12,7 +12,8 @@
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       },
-      "appleTeamId": "JAUSPN67UY"
+      "appleTeamId": "JAUSPN67UY",
+      "buildNumber": "51"
     },
     "android": {
       "package": "com.harshith.superapp"
