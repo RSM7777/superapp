@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 from ..auth import current_user_id
 from ..config import get_settings
 from ..db import get_db
-from ..inbox.gmail_client import GmailClient
 from ..kernel import record_decision
 from ..llm.provider import LLMProvider
 from ..memory import recall, remember
@@ -27,7 +26,6 @@ from ..models import InboxMessage, utcnow
 from ..substrate import get_context
 from ..substrate.events import append_event
 from ..substrate.inbox import create_draft, get_draft
-from ..vault import get_token
 from ..voice import tts
 
 router = APIRouter(prefix="/v1/voice", tags=["voice"])
@@ -594,8 +592,8 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
         accts = accounts(db, user_id)
         if not accts:
             return {"say": "No mailbox is connected yet."}
-        token = get_token(db, user_id=user_id, provider=f"gmail:{accts[0].email}")
-        client = GmailClient(json.loads(token) if token else None)
+        from ..inbox.factory import client_for
+        client = client_for(db, user_id, accts[0])
         subject = parsed.get("subject") or "(no subject)"
         # Idempotency: a duplicate action tag (stream retries) or a repeated
         # model emission must never mail someone twice. Same recipient +
@@ -649,11 +647,9 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
                 return {"say": "That one is already on its way."}
             draft.status = "auto_sending"
         msg = db.get(InboxMessage, draft.message_id)
-        token = get_token(db, user_id=user_id, provider=f"gmail:{msg.account_email}")
-        client = GmailClient(json.loads(token) if token else None)
+        from ..inbox.factory import send_via
         try:
-            sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
-                                        body=draft.body, thread_id=msg.thread_id)
+            sent_id = send_via(db, user_id, msg, draft.body)
         except Exception:
             if was_auto:
                 draft.status = "waiting"

@@ -324,17 +324,27 @@ class OutfitSuggestion(Base):
 
 
 class GmailAccount(Base):
-    """One connected mailbox. OAuth tokens live encrypted in token_vault
-    (provider = "gmail:{email}"); this row holds sync state."""
+    """One connected mailbox, of any provider. OAuth tokens live encrypted in
+    token_vault under "{provider}:{email}"; this row holds sync state.
+
+    The table keeps its original name so no historic event payload lies.
+    """
 
     __tablename__ = "gmail_accounts"
-    __table_args__ = (UniqueConstraint("user_id", "email", name="uq_gmail_account"),)
+    __table_args__ = (UniqueConstraint("user_id", "provider", "email",
+                                       name="uq_mail_account"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # "gmail" | "outlook" | "stub". Also the vault namespace for this mailbox.
+    provider: Mapped[str] = mapped_column(String(16), default="gmail", nullable=False)
     email: Mapped[str] = mapped_column(String(128), nullable=False)
-    history_id: Mapped[str] = mapped_column(String(32), default="")  # incremental sync cursor
+    # Opaque incremental-sync cursor: a Gmail history id, or a Graph delta
+    # link, which is a full URL — hence Text rather than a short string.
+    history_id: Mapped[str] = mapped_column(Text, default="")
     watch_expiry: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Push-notification registration id, for providers that name one.
+    subscription_id: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -351,8 +361,8 @@ class InboxMessage(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     account_email: Mapped[str] = mapped_column(String(128), nullable=False)
-    gmail_msg_id: Mapped[str] = mapped_column(String(32), nullable=False)
-    thread_id: Mapped[str] = mapped_column(String(32), default="")
+    gmail_msg_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(256), default="")
     from_name: Mapped[str] = mapped_column(String(128), default="")
     from_addr: Mapped[str] = mapped_column(String(128), default="")
     subject: Mapped[str] = mapped_column(String(256), default="")
@@ -466,7 +476,9 @@ class TokenVaultEntry(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    provider: Mapped[str] = mapped_column(String(64), nullable=False)  # plaid:{item} | gmail:{email}
+    # plaid:{item} | gmail:{email} | outlook:{email} — long enough for a
+    # provider prefix over a full-length address.
+    provider: Mapped[str] = mapped_column(String(192), nullable=False)
     ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

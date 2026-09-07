@@ -24,7 +24,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..inbox.gmail_client import GmailClient
 from ..llm.provider import LLMProvider
 from ..push import send_push
 from ..sdui.blocks import (
@@ -35,7 +34,6 @@ from ..substrate import ContextSlice
 from ..substrate.events import recent_events
 from ..substrate.inbox import (accounts, create_draft, insert_message,
     AUTO_REPLIES_PER_THREAD, replies_sent_in_thread)
-from ..vault import get_token
 from ..kernel import record_decision
 from .base import EventWrite, FactWrite, ThinkResult, register_agent
 
@@ -324,8 +322,15 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
         pass
 
     for acct in accounts(db, context.user_id):
-        token = get_token(db, user_id=context.user_id, provider=f"gmail:{acct.email}")
-        client = GmailClient(json.loads(token) if token else None)
+        from ..inbox.base import MailNotConnected
+        from ..inbox.factory import client_for
+        try:
+            client = client_for(db, context.user_id, acct)
+        except MailNotConnected:
+            # No usable credential. Say so and move to the next mailbox
+            # rather than pretending this one is fine.
+            _flag_reauth(db, context.user_id, acct.email)
+            continue
         try:
             msgs, new_hid = client.new_messages(acct.history_id)
         except httpx.HTTPStatusError as exc:

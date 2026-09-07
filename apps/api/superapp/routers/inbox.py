@@ -23,20 +23,26 @@ from ..inbox.gmail_client import GmailClient
 from ..models import InboxMessage
 from ..substrate import append_event
 from ..substrate.inbox import get_draft, upsert_account
-from ..vault import get_token, store_token
+from ..vault import store_token
 
 router = APIRouter(prefix="/v1", tags=["inbox"])
 
 
-def _connect(db: Session, *, user_id: str, email: str, token: dict) -> dict:
-    store_token(db, user_id=user_id, provider=f"gmail:{email}", token=json.dumps(token))
-    acct = upsert_account(db, user_id=user_id, email=email)
-    client = GmailClient(token)
-    expiry = client.watch()  # register Pub/Sub push where configured
-    if expiry:
-        acct.watch_expiry = expiry
+def _connect(db: Session, *, user_id: str, email: str, token: dict,
+             provider: str = "gmail") -> dict:
+    from ..inbox.factory import client_for, vault_key
+    acct = upsert_account(db, user_id=user_id, email=email, provider=provider)
+    store_token(db, user_id=user_id, provider=vault_key(acct), token=json.dumps(token))
+    try:  # push registration is a nicety; never block a link on it
+        expiry, sub_id = client_for(db, user_id, acct).subscribe()
+        if expiry:
+            acct.watch_expiry = expiry
+        if sub_id:
+            acct.subscription_id = sub_id
+    except Exception:  # noqa: BLE001
+        pass
     append_event(db, user_id=user_id, type="gmail_connected", agent="inbox", domain="inbox",
-                 payload={"email": email})
+                 payload={"email": email, "provider": provider})
     # Initial backfill + triage (the onboarding "scan" moment).
     run_think(db, agent="inbox", user_id=user_id, trigger={"kind": "email_sync", "reason": "backfill"})
     return render_screen(db, agent="inbox", user_id=user_id).model_dump()
@@ -44,9 +50,12 @@ def _connect(db: Session, *, user_id: str, email: str, token: dict) -> dict:
 
 @router.post("/inbox/connect/stub")
 def connect_stub(user_id: str = Depends(current_user_id), db: Session = Depends(get_db)):
-    if not GmailClient().stubbed:
+    from ..inbox.factory import configured
+    if configured("gmail"):
         raise HTTPException(status_code=400, detail="Live Gmail configured; use /v1/gmail/auth-url")
-    return _connect(db, user_id=user_id, email="stub@example.com", token={"stub": True})
+    from ..inbox.stub_client import STUB_ADDRESS
+    return _connect(db, user_id=user_id, email=STUB_ADDRESS, token={"stub": True},
+                    provider="stub")
 
 
 def _sign_state(user_id: str) -> str:
@@ -64,10 +73,10 @@ def _verify_state(state: str) -> str:
 
 @router.get("/gmail/auth-url")
 def gmail_auth_url(user_id: str = Depends(current_user_id)):
-    client = GmailClient()
-    if client.stubbed:
+    from ..inbox.factory import configured, link_client
+    if not configured("gmail"):
         raise HTTPException(status_code=400, detail="Set SUPERAPP_GOOGLE_CLIENT_ID first")
-    return {"auth_url": client.auth_url(state=_sign_state(user_id))}
+    return {"auth_url": link_client("gmail").auth_url(state=_sign_state(user_id))}
 
 
 @router.get("/gmail/callback")
@@ -75,9 +84,9 @@ def gmail_callback(code: str, state: str = "", db: Session = Depends(get_db)):
     """OAuth redirect target (browser; Google can't send our bearer). Identity
     comes from the HMAC-signed state we generated in auth-url."""
     user_id = _verify_state(state)
-    client = GmailClient()
-    token = client.exchange_code(code)
-    email = GmailClient(token).profile()["emailAddress"]
+    from ..inbox.factory import link_client
+    token = link_client("gmail").exchange_code(code)
+    email = GmailClient(token).address()
     _connect(db, user_id=user_id, email=email, token=token)
     from ..agents.inbox import _heal_reauth
     _heal_reauth(db, user_id)
@@ -178,11 +187,9 @@ def send_draft(draft_id: str, user_id: str = Depends(current_user_id), db: Sessi
             raise HTTPException(status_code=409, detail="Already on its way")
         draft.status = "auto_sending"
     msg = db.get(InboxMessage, draft.message_id)
-    token = get_token(db, user_id=user_id, provider=f"gmail:{msg.account_email}")
-    client = GmailClient(json.loads(token) if token else None)
+    from ..inbox.factory import send_via
     try:
-        sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
-                                    body=draft.body, thread_id=msg.thread_id)
+        sent_id = send_via(db, user_id, msg, draft.body)
     except Exception:
         if was_auto:   # give it back as an ordinary ask rather than strand it
             draft.status = "waiting"
@@ -329,11 +336,11 @@ def inbox_state(user_id: str = Depends(current_user_id), db: Session = Depends(g
         UserFact.key == "reauth_needed"))
     reauth = None
     if flag and (flag.value or {}).get("needed"):
-        client = GmailClient()
+        from ..inbox.factory import configured, link_client
         reauth = {"needed": True,
                   "email": (flag.value or {}).get("email", ""),
-                  "auth_url": None if client.stubbed
-                  else client.auth_url(state=_sign_state(user_id))}
+                  "auth_url": (link_client("gmail").auth_url(state=_sign_state(user_id))
+                               if configured("gmail") else None)}
 
     ar_fact = _autoreply_fact(db, user_id)
     auto_kinds = list((ar_fact.value or {}).get("kinds", [])) if ar_fact else []
@@ -501,11 +508,9 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
         if draft_leaks_new_destination(d.body, msg.body_text or "",
                                        allowed=f"{msg.from_addr} {msg.account_email}"):
             continue
-        token = get_token(db, user_id=user_id, provider=f"gmail:{msg.account_email}")
-        client = GmailClient(json.loads(token) if token else None)
+        from ..inbox.factory import send_via
         try:
-            sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
-                                        body=d.body, thread_id=msg.thread_id, auto=True)
+            sent_id = send_via(db, user_id, msg, d.body, auto=True)
         except Exception:  # noqa: BLE001
             continue
         d.status = "sent"

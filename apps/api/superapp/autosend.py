@@ -11,7 +11,6 @@ Timing: an in-process timer fires at the deadline (uvicorn runs one process;
 syncs and their timers live in it). Two backstops catch a restart inside
 the window: every inbox sync and every dispatcher tick send whatever is due.
 """
-import json
 import threading
 from datetime import timedelta
 
@@ -256,12 +255,10 @@ def _hold(db: Session, d: InboxDraft, msg: InboxMessage | None, why: str) -> Non
 
 
 def _send_one(db: Session, d: InboxDraft) -> bool:
-    from .inbox.gmail_client import GmailClient
     from .kernel import record_decision
     from .policy import assess, draft_leaks_new_destination, has_placeholder
     from .substrate import append_event
     from .substrate.inbox import AUTO_REPLIES_PER_THREAD, replies_sent_in_thread
-    from .vault import get_token
 
     settings = get_settings()
     msg = db.get(InboxMessage, d.message_id)
@@ -285,11 +282,9 @@ def _send_one(db: Session, d: InboxDraft) -> bool:
     if replies_sent_in_thread(db, user_id=d.user_id, thread_id=msg.thread_id) >= AUTO_REPLIES_PER_THREAD:
         _hold(db, d, msg, "thread already had its auto-replies today")
         return False
-    token = get_token(db, user_id=d.user_id, provider=f"gmail:{msg.account_email}")
-    client = GmailClient(json.loads(token) if token else None)
+    from .inbox.factory import send_via
     try:
-        sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
-                                    body=d.body, thread_id=msg.thread_id, auto=True)
+        sent_id = send_via(db, d.user_id, msg, d.body, auto=True)
     except Exception as e:  # noqa: BLE001
         _hold(db, d, msg, f"send failed: {type(e).__name__}")
         return False
