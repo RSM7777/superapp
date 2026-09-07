@@ -28,6 +28,11 @@ from ..vault import get_token, store_token
 router = APIRouter(prefix="/v1", tags=["inbox"])
 
 
+def accounts_exist(db: Session, user_id: str) -> bool:
+    from ..substrate.inbox import accounts as _accounts
+    return bool(_accounts(db, user_id))
+
+
 def _connect(db: Session, *, user_id: str, email: str, token: dict) -> dict:
     store_token(db, user_id=user_id, provider=f"gmail:{email}", token=json.dumps(token))
     acct = upsert_account(db, user_id=user_id, email=email)
@@ -378,6 +383,106 @@ def backfill_inbox(background: BackgroundTasks,
     from ..routers.screen import _background_think
     background.add_task(_background_think, "inbox", user_id, {"kind": "backfill"})
     return {"ok": True}
+
+
+class ImportHistoryBody(BaseModel):
+    months: int = Field(24, ge=1, le=120)
+    limit: int = Field(1500, ge=1, le=20000)
+
+
+def _run_history_import(user_id: str, months: int, limit: int) -> None:
+    """Read past mail into the record. Deliberately not `think()`: nothing here
+    triages, drafts, archives or sends, and it must stay that way."""
+    from ..db import SessionLocal
+    from ..llm.provider import LLMProvider
+    from ..substrate.history import import_history
+    from ..substrate.inbox import accounts as _accounts
+
+    db = SessionLocal()
+    try:
+        provider = LLMProvider()
+        total = {"seen": 0, "recorded": 0, "chunks": 0, "people": 0}
+        for acct in _accounts(db, user_id):
+            token = get_token(db, user_id=user_id, provider=f"gmail:{acct.email}")
+            client = GmailClient(json.loads(token) if token else None)
+            msgs = client.history(months=months, limit=limit)
+            stats = import_history(db, user_id=user_id, account_email=acct.email,
+                                   messages=msgs, provider=provider)
+            for k in total:
+                total[k] += stats.get(k, 0)
+        append_event(db, user_id=user_id, type="history_imported", agent="inbox",
+                     domain="inbox", payload={**total, "months": months})
+        db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/inbox/import/history")
+def import_mail_history(body: ImportHistoryBody, background: BackgroundTasks,
+                        user_id: str = Depends(current_user_id),
+                        db: Session = Depends(get_db)):
+    """Read past conversation — sent and received, inbox and archive — into the
+    record, so the assistant knows the relationship instead of meeting everyone
+    for the first time.
+
+    This is not a bigger backfill. `/inbox/backfill` feeds the QUEUE, so what it
+    ingests gets triaged and drafted for; that is why it stays small and recent.
+    This writes only to mail_history and memory, which no action path reads. Old
+    mail is therefore never replied to, never archived, and never reordered.
+    """
+    if not accounts_exist(db, user_id):
+        raise HTTPException(status_code=409, detail="Connect a mailbox first.")
+    background.add_task(_run_history_import, user_id, body.months, body.limit)
+    return {"ok": True, "started": True, "months": body.months,
+            "note": "Import is read-only: nothing in it is triaged, replied to or archived."}
+
+
+class ImportSourceBody(BaseModel):
+    """One piece of context that did not arrive as email."""
+    kind: str = Field("note", max_length=32)   # note | transcript | document | slides
+    title: str = Field(..., min_length=1, max_length=256)
+    text: str = Field(..., min_length=1, max_length=400_000)
+    author: str = Field("", max_length=320)
+    occurred_at: str = ""      # ISO date/time the thing actually happened
+    project: str = Field("", max_length=120)
+    source_ref: str = Field("", max_length=512)   # link back to the original
+
+
+@router.post("/knowledge/import")
+def import_knowledge(body: ImportSourceBody,
+                     user_id: str = Depends(current_user_id),
+                     db: Session = Depends(get_db)):
+    """The one door for notes, meeting transcripts, documents and slide text.
+
+    Provenance is required to be useful, not decorative: who said it, when it
+    happened, which project, and a link back. A retrieved passage that cannot
+    say where it came from cannot be checked, and an assistant that cites
+    nothing is one that can be believed about anything.
+
+    Imported text is treated exactly like an email body — untrusted content to
+    reason over, never instructions to follow.
+    """
+    from datetime import datetime as _dt
+
+    from ..memory import import_source
+    when = None
+    if body.occurred_at:
+        try:
+            when = _dt.fromisoformat(body.occurred_at.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=422,
+                                detail="occurred_at must be ISO 8601, e.g. 2026-03-14T10:00:00Z")
+    out = import_source(db, user_id=user_id, kind=body.kind[:32], title=body.title,
+                        text_body=body.text, author=body.author,
+                        occurred_at=when, project=body.project,
+                        source_ref=body.source_ref)
+    if out["stored"]:
+        append_event(db, user_id=user_id, type="source_imported", agent="inbox",
+                     domain="knowledge",
+                     payload={"kind": body.kind, "title": body.title[:120],
+                              "chunks": out["chunks"], "project": body.project})
+    db.commit()
+    return out
 
 
 @router.post("/inbox/drafts/{draft_id}/dismiss")

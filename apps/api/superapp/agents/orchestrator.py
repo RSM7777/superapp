@@ -139,9 +139,15 @@ def _remember_day(db: Session, context: ContextSlice) -> int:
         gist = m.gist or m.subject
         if not gist:
             continue
+        # The whole body, chunked — not the first 300 characters. What made an
+        # email matter is usually not in its opening lines.
         remember(db, user_id=context.user_id, domain="inbox", kind="email",
-                 ref_id=m.id, content=f"Email from {m.from_name}: {gist}. "
-                                      f"Verdict: {m.tier}. {(m.body_text or '')[:300]}")
+                 ref_id=m.id,
+                 content=f"Email from {m.from_name} <{m.from_addr}>: {gist}. "
+                         f"Verdict: {m.tier}.\n\n{m.body_text or ''}",
+                 source="gmail", author=m.from_addr, title=m.subject,
+                 source_ref=f"https://mail.google.com/mail/u/0/#all/{m.gmail_msg_id}",
+                 event_at=m.received_at)
         n += 1
     return n
 
@@ -451,6 +457,14 @@ def orchestrator_think(db: Session, *, trigger: dict, context: ContextSlice,
         confidence=1.0))
 
     remembered = _remember_day(db, context)
+    # Anything the embedding provider was down for is still sitting there with
+    # its text and no vector. An outage should cost a night's latency, never a
+    # permanent hole in what can be found.
+    try:
+        from ..memory import retry_pending
+        re_embedded = retry_pending(db, user_id=context.user_id)
+    except Exception:  # noqa: BLE001 — a retry failing is not a failed night
+        re_embedded = 0
     decayed = _decay(db, context.user_id, result)
     try:
         dream = _dream(db, context, result)
@@ -459,7 +473,7 @@ def orchestrator_think(db: Session, *, trigger: dict, context: ContextSlice,
         result.event_writes.append(EventWrite(type="dream", payload=dream))
     result.event_writes.append(EventWrite(
         type="reflection_run", payload={"remembered": remembered, "decayed": decayed,
-                                        "dream": dream}))
+                                        "re_embedded": re_embedded, "dream": dream}))
 
     if trigger.get("kind") == "morning":
         send_push(db, user_id=context.user_id, title="Nano — your morning",

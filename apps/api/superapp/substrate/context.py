@@ -20,7 +20,10 @@ AGENT_SCOPES: dict[str, list[str] | None] = {
     "orchestrator": None,
     "nutrition": ["nutrition", "goals", "health", "identity"],
     "finance": ["finance", "goals", "identity"],
-    "inbox": ["inbox", "goals", "identity"],
+    # "knowledge" is imported source material: notes, transcripts, documents,
+    # slide text. The inbox reads it because that is what a reply needs to know;
+    # it is scoped like every other domain, so finance and health stay out.
+    "inbox": ["inbox", "goals", "identity", "knowledge"],
     "stylist": ["wardrobe", "goals", "nutrition", "finance", "identity"],
 }
 

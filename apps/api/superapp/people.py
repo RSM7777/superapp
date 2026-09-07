@@ -67,24 +67,47 @@ def get_person(db: Session, user_id: str, email: str) -> Person | None:
 
 def update_person(db: Session, provider: LLMProvider, user_id: str, *,
                   email: str, name: str = "", direction: str, subject: str,
-                  body: str) -> Person | None:
+                  body: str, occurred_at: datetime | None = None,
+                  enrich: bool = True) -> Person | None:
     """direction: 'from_them' | 'user_wrote'. Upserts the row always;
-    enriches via LLM when live (stub mode keeps counts honest, nothing more)."""
+    enriches via LLM when live (stub mode keeps counts honest, nothing more).
+
+    `occurred_at` is when the email was actually sent. It matters twice. The
+    profile is dated by it, so a note reads "asked about the lease (Mar 2024)"
+    instead of stamping every imported year with today. And `last_seen` only
+    ever moves FORWARD: importing a 2019 thread must not make a dormant contact
+    look like this morning's mail, because last_seen orders who the assistant
+    thinks is currently in the user's life.
+
+    `enrich=False` records the exchange without spending a model call. A deep
+    historical import passes False for the long tail — thousands of one-call
+    updates would cost more than the profiles are worth, and the profile is
+    better built from the recent, dense end of the record anyway.
+    """
     addr = email.lower().strip()
     if not is_human_sender(addr):
         return None
     person = get_person(db, user_id, addr)
     if person is not None and _SERVICE_RE.search(person.relationship or ""):
         return None  # judged a service before; don't spend another look
-    if person is None:
+    is_new = person is None
+    if is_new:
         person = Person(user_id=user_id, email=addr, name=name[:200])
         db.add(person)
         db.flush()
     if name and not person.name:
         person.name = name[:200]
     person.email_count += 1
-    person.last_seen = utcnow()
+    when = occurred_at or utcnow()
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    seen = None if is_new else person.last_seen   # a fresh row defaults to now
+    if seen is not None and seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    person.last_seen = when if (seen is None or when > seen) else seen
     person.updated_at = utcnow()
+    if not enrich:
+        return person
 
     resp = provider.complete(
         db, user_id=user_id, agent="inbox", task="person_update",
@@ -96,7 +119,9 @@ def update_person(db: Session, provider: LLMProvider, user_id: str, *,
             "new_email": {
                 "direction": ("they wrote to the user" if direction == "from_them"
                               else "the user wrote to them"),
-                "date": datetime.now(timezone.utc).date().isoformat(),
+                # The email's own date. Dating an imported 2019 thread "today"
+                # is how a profile fills up with facts that never happened.
+                "date": when.date().isoformat(),
                 "subject": subject[:200], "body": body[:4000],
             },
         }, sort_keys=True),

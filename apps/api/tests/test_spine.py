@@ -1617,16 +1617,21 @@ def test_priority_rule_removal_and_consumer_domain_guard():
     assert "lease paperwork" not in st["priority_kinds"]
 
 
-def test_never_miss_promotes_at_sync():
-    """The rule is enforced where triage happens. For a fresh user whose
-    'never miss' rule names AWS's domain, the AWS bill (heuristically
-    'cleared' as automated) lands in Needs you with a reply drafted and the
-    reason on the card."""
+def test_never_miss_raises_visibility_without_inventing_an_ask():
+    """A never-miss rule is a promise about what the user SEES, not a claim
+    that someone is waiting on them.
+
+    It used to force the tier to needs_reply, which drafted a reply to
+    no-reply@aws.amazon.com — a reply to an address that cannot receive one,
+    for a bill that asked nothing. Now the rule marks the mail important,
+    guarantees it appears in Needs you, and writes no draft. Whether a human is
+    actually waiting stays the triage model's call.
+    """
     from superapp.agents.base import run_think
     from superapp.models import InboxDraft, InboxMessage
     from superapp.routers.inbox import PriorityBody
     from superapp.routers.inbox import priority as _priority
-    from superapp.substrate.inbox import upsert_account
+    from superapp.substrate.inbox import inbox_context, upsert_account
 
     uid = "nevermiss-tester"
     db = SessionLocal()
@@ -1637,12 +1642,27 @@ def test_never_miss_promotes_at_sync():
     db.commit()
     m = db.scalar(select(InboxMessage).where(InboxMessage.user_id == uid,
                                              InboxMessage.from_addr == "no-reply@aws.amazon.com"))
-    assert m is not None and m.tier == "needs_reply"
-    assert m.why_now == "you asked not to miss these"
+    assert m is not None
+    # Raised out of the discard pile and marked important...
+    assert m.tier == "worth_knowing"
+    assert m.importance == "high"
     assert m.rule_promoted is True
-    d = db.scalar(select(InboxDraft).where(InboxDraft.message_id == m.id))
-    assert d is not None
-    # enabling an auto-reply rule that matches must NOT send it: the model saw no ask
+    assert m.why_now == "you asked not to miss these"
+    # ...but no reply obligation was manufactured, so no draft exists to send.
+    assert m.requires_reply is False
+    assert db.scalar(select(InboxDraft).where(InboxDraft.message_id == m.id)) is None
+
+    # The promise the user actually made is kept: it is in Needs you, once,
+    # and it is not also sitting in Worth knowing.
+    state = inbox_context(db, uid)
+    ids = [r["id"] for r in state["needs_reply"]]
+    assert ids.count(m.id) == 1
+    assert m.id not in [r["id"] for r in state["worth_knowing"]]
+    card = next(r for r in state["needs_reply"] if r["id"] == m.id)
+    assert card["draft"] is None and card["importance"] == "high"
+
+    # Enabling an auto-reply rule that matches this sender sends nothing:
+    # there is no draft, and there never was an ask.
     import superapp.config as config_module
     from superapp.routers.inbox import send_matching_pending_drafts
     settings = config_module.get_settings()
@@ -1653,11 +1673,12 @@ def test_never_miss_promotes_at_sync():
     finally:
         settings.gmail_scope_tier = prev
     db.commit()
-    assert db.get(InboxDraft, d.id).status == "waiting"
-    # an unrelated automated mail stays filed away
+
+    # An unrelated automated mail stays filed away.
     fig = db.scalar(select(InboxMessage).where(InboxMessage.user_id == uid,
                                                InboxMessage.from_addr == "team@figma.com"))
     assert fig is not None and fig.tier != "needs_reply"
+    assert fig.rule_promoted is not True
     db.close()
 
 
@@ -2379,3 +2400,261 @@ def test_voice_rewrite_makes_a_draft_ready():
     assert db.get(InboxDraft, d.id).generation_status == "ready"
     assert db.get(InboxDraft, d.id).body.startswith("Thanks Rita")
     db.close()
+
+
+# --- Rich context: the record, the chunking, and the honest failure ---------
+
+def test_chunking_keeps_what_truncation_dropped():
+    """Long material used to be cut at 2,000 characters before embedding, so a
+    decision recorded in the last paragraph of a meeting note simply was not in
+    the database. Chunking is what makes 'search everything' true."""
+    from superapp.memory import CHUNK_CHARS, chunk
+
+    filler = "We discussed the roadmap at some length. " * 90        # ~3.7k chars
+    note = filler + "\n\nDecision: we ship the Berlin pilot on 3 March."
+    pieces = chunk(note)
+
+    assert len(pieces) > 1, "long note must be split, not truncated"
+    assert all(len(p) <= CHUNK_CHARS for p in pieces)
+    joined = " ".join(pieces)
+    assert "Berlin pilot on 3 March" in joined, "the decision at the end survived"
+    # And the short case stays one piece — no gratuitous fragmentation.
+    assert chunk("A short note.") == ["A short note."]
+    assert chunk("   ") == []
+
+    # The invariant that matters: nothing is lost. A long run with no blank
+    # lines and no spaces (a pasted table, a base64 blob, a wall of prose)
+    # must still come back whole. The first cut of this used a regex that
+    # looked like it split and in fact discarded 3,600 of 5,000 characters.
+    blob = "x" * 5000
+    assert "".join(p.strip() for p in chunk(blob)).count("x") >= 5000
+    prose = ("The quarterly numbers came in above plan. " * 200).strip()
+    rejoined = " ".join(chunk(prose))
+    assert rejoined.count("above plan") >= 200
+
+
+def test_embedding_failure_is_never_disguised_as_a_vector():
+    """An outage used to store a sha256 hash projection that looks like an
+    embedding and retrieves nothing meaningful — a silent hole in memory. Now
+    the failure raises, so the caller keeps the text and marks it for retry."""
+    import httpx
+    import pytest as _pytest
+
+    import superapp.memory as memory_module
+    from superapp.config import get_settings
+
+    settings = get_settings()
+    prev = settings.voyage_api_key
+
+    # No key configured: the deterministic stub is fine, but it says so.
+    settings.voyage_api_key = ""
+    try:
+        vecs, status = memory_module.embed(["hello"])
+        assert status == "stub" and len(vecs[0]) == memory_module.DIMS
+
+        # Key configured but the provider is down: loud, not silently wrong.
+        settings.voyage_api_key = "test-key"
+        original = memory_module.httpx.post
+
+        def _down(*a, **k):
+            raise httpx.ConnectError("provider down")
+
+        memory_module.httpx.post = _down
+        try:
+            with _pytest.raises(memory_module.EmbeddingUnavailable):
+                memory_module.embed(["hello"])
+        finally:
+            memory_module.httpx.post = original
+    finally:
+        settings.voyage_api_key = prev
+
+
+def test_history_import_is_a_record_never_a_queue():
+    """Importing years of mail must not produce years of replies. History goes
+    to mail_history, which no action path reads: nothing imported is triaged,
+    drafted for, archived or sent."""
+    from superapp.models import InboxDraft, InboxMessage, MailHistory
+    from superapp.substrate.history import import_history, sender_history, thread_history
+
+    uid = "history-tester"
+    db = SessionLocal()
+    msgs = [
+        {"gmail_msg_id": "h1", "thread_id": "t9", "direction": "inbound",
+         "from_addr": "priya@example.com", "to_addrs": "me@example.com",
+         "subject": "Lease renewal", "body_text": "Can we renew for another year?",
+         "received_at": "2024-03-14T09:00:00+00:00"},
+        {"gmail_msg_id": "h2", "thread_id": "t9", "direction": "outbound",
+         "from_addr": "me@example.com", "to_addrs": "priya@example.com",
+         "subject": "Re: Lease renewal", "body_text": "Yes, happy to renew.",
+         "received_at": "2024-03-15T09:00:00+00:00"},
+    ]
+    stats = import_history(db, user_id=uid, account_email="me@example.com",
+                           messages=msgs, provider=None)
+    db.commit()
+
+    assert stats["recorded"] == 2
+    assert db.query(MailHistory).filter_by(user_id=uid).count() == 2
+    # The queue was not touched, so nothing downstream can act on any of it.
+    assert db.query(InboxMessage).filter_by(user_id=uid).count() == 0
+    assert db.query(InboxDraft).filter_by(user_id=uid).count() == 0
+
+    # Re-importing the same mail is a no-op, not a duplicate history.
+    again = import_history(db, user_id=uid, account_email="me@example.com",
+                           messages=msgs, provider=None)
+    db.commit()
+    assert again["recorded"] == 0
+    assert db.query(MailHistory).filter_by(user_id=uid).count() == 2
+
+    # "Have I ever answered this person" — readable only because sent mail,
+    # which the working set filters out by design, is in the record.
+    hist = sender_history(db, user_id=uid, addr="priya@example.com")
+    assert hist["messages_from_them"] == 1
+    assert hist["replied_to_them"] == 1
+    assert hist["last_contact"].startswith("2024-03-14")
+
+    # The thread reads oldest-first, the way a person scrolls up before replying.
+    thread = thread_history(db, user_id=uid, thread_id="t9")
+    assert [t["who"] for t in thread] == ["priya@example.com", "the user"]
+    assert "renew for another year" in thread[0]["excerpt"]
+    db.close()
+
+
+def test_imported_history_is_dated_when_it_happened():
+    """A profile built from imported mail must not claim a decade of contact
+    happened this morning. last_seen orders who is currently in the user's
+    life, so it only ever moves forward."""
+    from datetime import datetime, timedelta, timezone
+
+    from superapp.llm.provider import LLMProvider
+    from superapp.people import get_person, update_person
+
+    uid = "dated-tester"
+    db = SessionLocal()
+    provider = LLMProvider()
+    old = datetime(2019, 5, 1, tzinfo=timezone.utc)
+    recent = datetime.now(timezone.utc) - timedelta(days=3)
+
+    update_person(db, provider, uid, email="sam@example.com", name="Sam",
+                  direction="from_them", subject="Old thread", body="hi",
+                  occurred_at=recent, enrich=False)
+    update_person(db, provider, uid, email="sam@example.com",
+                  direction="from_them", subject="Older thread", body="hi",
+                  occurred_at=old, enrich=False)
+    db.commit()
+
+    person = get_person(db, uid, "sam@example.com")
+    assert person.email_count == 2, "both exchanges counted"
+    seen = person.last_seen
+    seen = seen if seen.tzinfo else seen.replace(tzinfo=timezone.utc)
+    # Importing the 2019 mail did not make a dormant contact look fresh, and
+    # today's import date did not overwrite the real one either.
+    assert abs((seen - recent).total_seconds()) < 5
+    db.close()
+
+
+def test_evidence_reaches_triage_and_the_drafter():
+    """The point of a rich corpus is that something reads it. Both the triage
+    payload and the draft payload must carry who the sender is and what came
+    before — otherwise the assistant meets everyone for the first time."""
+    import json
+
+    from superapp.agents.inbox import _draft_reply, _evidence, _triage_one
+    from superapp.models import InboxMessage
+    from superapp.substrate import get_context
+    from superapp.substrate.history import import_history
+    from superapp.llm.provider import LLMProvider
+
+    uid = "evidence-tester"
+    db = SessionLocal()
+    import_history(db, user_id=uid, account_email="me@example.com", provider=None, messages=[
+        {"gmail_msg_id": "e1", "thread_id": "tz", "direction": "inbound",
+         "from_addr": "dana@example.com", "to_addrs": "me@example.com",
+         "subject": "Berlin pilot", "body_text": "Are we still on for March?",
+         "received_at": "2026-02-01T09:00:00+00:00"},
+        {"gmail_msg_id": "e2", "thread_id": "tz", "direction": "outbound",
+         "from_addr": "me@example.com", "to_addrs": "dana@example.com",
+         "subject": "Re: Berlin pilot", "body_text": "Yes, 3 March works.",
+         "received_at": "2026-02-02T09:00:00+00:00"},
+    ])
+    msg = InboxMessage(user_id=uid, account_email="me@example.com", gmail_msg_id="e3",
+                       thread_id="tz", from_addr="dana@example.com", from_name="Dana",
+                       subject="Re: Berlin pilot", body_text="Confirming the date?")
+    db.add(msg)
+    db.commit()
+
+    ev = _evidence(db, msg, deep=True)
+    assert ev["sender_history"]["messages_from_them"] == 1
+    assert ev["sender_history"]["replied_to_them"] == 1
+    assert any("3 March" in t["excerpt"] for t in ev["thread_so_far"])
+    # An environment without pgvector says so, rather than reading as "nothing
+    # to know" — an eval that cannot tell the difference measures noise.
+    assert ev["memory"].startswith("unavailable")
+
+    # And the same evidence is actually in what the model is sent, both times.
+    seen: list[str] = []
+    provider = LLMProvider()
+    original = provider.complete
+
+    def _capture(db_, **kw):
+        seen.append(kw.get("prompt", ""))
+        return original(db_, **kw)
+
+    provider.complete = _capture
+    context = get_context(db, agent="inbox", user_id=uid)
+    _triage_one(db, context, provider, msg)
+    _draft_reply(db, context, provider, msg)
+    assert len(seen) >= 2
+    for prompt in seen[:2]:
+        payload = json.loads(prompt)
+        assert "evidence" in payload, "the model was asked to judge without context"
+        assert payload["evidence"]["sender_history"]["replied_to_them"] == 1
+    db.close()
+
+
+def test_recall_is_entitlement_scoped_like_facts():
+    """Unscoped recall would quietly undo the one hard architectural rule. The
+    inbox agent reads inbox, goals, identity and imported knowledge — never
+    finance or health, however suggestive the email."""
+    import pytest as _pytest
+
+    from superapp.memory import recall_for_agent
+    from superapp.substrate.context import AGENT_SCOPES
+
+    assert set(AGENT_SCOPES["inbox"]) == {"inbox", "goals", "identity", "knowledge"}
+    assert "finance" not in AGENT_SCOPES["inbox"]
+    assert "nutrition" not in AGENT_SCOPES["inbox"]
+
+    db = SessionLocal()
+    with _pytest.raises(ValueError):
+        recall_for_agent(db, agent="not-an-agent", user_id="u", query="x")
+    db.close()
+
+
+def test_source_import_says_when_memory_is_off():
+    """An import that stored nothing must say why. A harness that reads silence
+    as 'nothing to know' scores a system with its memory switched off and
+    concludes that context does not help."""
+    from superapp.memory import import_source
+
+    db = SessionLocal()
+    out = import_source(db, user_id="import-tester", kind="transcript",
+                        title="Weekly sync", text_body="We agreed to ship on 3 March.",
+                        author="dana@example.com", project="berlin")
+    db.close()
+    assert out["stored"] is False
+    assert "Postgres" in out["reason"], "silence would read as 'nothing to know'"
+    assert out["ref_id"].startswith("import-")
+
+
+def test_import_endpoints_are_mounted():
+    """Both doors exist and are authenticated: past mail, and everything that
+    never arrived as mail."""
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/v1/inbox/import/history" in paths
+    assert "/v1/knowledge/import" in paths
+    # No bearer token: refused, like every other user-scoped route.
+    assert client.post("/v1/knowledge/import",
+                       json={"title": "x", "text": "y"}).status_code in (401, 403)
+    bad = client.post("/v1/knowledge/import", headers=AUTH,
+                      json={"title": "x", "text": "y", "occurred_at": "last tuesday"})
+    assert bad.status_code == 422, "a date we cannot parse must not become 'today'"

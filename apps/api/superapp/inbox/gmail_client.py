@@ -13,7 +13,7 @@ import re as re_mod
 import time
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 
 import httpx
 
@@ -203,10 +203,62 @@ class GmailClient:
                 msgs.append(parsed)
         return msgs
 
-    def _parse(self, raw: dict) -> dict | None:
+    def history(self, *, months: int = 24, limit: int = 1500,
+                page_size: int = 100) -> list[dict]:
+        """Past conversation for context: sent AND received, inbox and archive,
+        going back `months`. Read-only and inert.
+
+        This is deliberately NOT `backfill`. backfill feeds the queue, so what
+        it returns gets triaged, drafted for and possibly archived — which is
+        why it is small, recent, and Primary-only. Everything here goes to
+        mail_history instead, where nothing acts on it. That separation is what
+        makes "import two years of mail" a safe thing to offer: the import
+        cannot reply to a 2024 email, because the reply path never reads this.
+
+        `-in:chats -in:drafts` keeps Hangouts noise and unsent fragments out.
+        """
+        if self.stubbed:
+            return []
+        after = (datetime.now(timezone.utc) - timedelta(days=months * 31)).strftime("%Y/%m/%d")
+        q = f"after:{after} -in:chats -in:drafts -in:spam -in:trash"
+        out: list[dict] = []
+        page = None
+        while len(out) < limit:
+            params = {"q": q, "maxResults": min(page_size, limit - len(out))}
+            if page:
+                params["pageToken"] = page
+            data = self._get("/messages", **params)
+            refs = data.get("messages", [])
+            if not refs:
+                break
+            for ref in refs:
+                try:
+                    parsed = self._parse(self._get(f"/messages/{ref['id']}", format="full"),
+                                         queue=False)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code in (403, 404, 410):
+                        continue
+                    raise
+                if parsed:
+                    out.append(parsed)
+            page = data.get("nextPageToken")
+            if not page:
+                break
+        return out
+
+    def _parse(self, raw: dict, *, queue: bool = True) -> dict | None:
+        """queue=True is the working set: new Primary-inbox mail, the only
+        thing that may ever be triaged, drafted for or archived.
+
+        queue=False is the historical record — sent mail, archived mail, old
+        threads. Same header parsing, no label filter, and the result is only
+        ever written to mail_history, which nothing downstream treats as work.
+        """
         labels = set(raw.get("labelIds", []))
-        if "INBOX" not in labels or labels & SKIP_LABELS:
+        if queue and ("INBOX" not in labels or labels & SKIP_LABELS):
             return None  # not new Primary-inbox mail
+        if not queue and labels & {"SPAM", "TRASH", "DRAFT"}:
+            return None  # never a record of a real exchange
         headers = {h["name"].lower(): h["value"]
                    for h in raw.get("payload", {}).get("headers", [])}
         name, addr = parseaddr(headers.get("from", ""))
@@ -225,15 +277,37 @@ class GmailClient:
         # RFC 3834: mail that announces itself as automatic (our own auto-replies
         # included) must never be auto-answered, or two assistants loop forever.
         auto_sub = headers.get("auto-submitted", "").strip().lower()
+
+        def addrs(header: str) -> str:
+            """Comma-joined addresses, lowercased. Display names are dropped:
+            they are attacker-chosen and we only ever match on the address."""
+            raw_v = headers.get(header, "")
+            out = [a.strip().lower() for _, a in getaddresses([raw_v]) if a and "@" in a]
+            return ",".join(dict.fromkeys(out))[:2000]
+
         return {
             "gmail_msg_id": raw["id"], "thread_id": raw.get("threadId", ""),
             "from_name": name or addr, "from_addr": addr,
             "subject": headers.get("subject", ""),
+            # The envelope. Kept because who else was on it, and whether this is
+            # a reply inside a thread, decide importance far better than a body.
+            "to_addrs": addrs("to"),
+            "cc_addrs": addrs("cc"),
+            "reply_to": (parseaddr(headers.get("reply-to", ""))[1] or "").lower()[:320],
+            "message_id_hdr": headers.get("message-id", "")[:320],
+            "in_reply_to": headers.get("in-reply-to", "")[:320],
+            "list_id": headers.get("list-id", "")[:320],
+            "precedence": headers.get("precedence", "").strip().lower()[:32],
+            "has_list_unsubscribe": bool(headers.get("list-unsubscribe", "").strip()),
             "auto_submitted": (auto_sub not in ("", "no")) or headers.get("x-nano-auto", "") == "1",
             "body_text": body[:MAX_BODY_CHARS],
             "received_at": datetime.fromtimestamp(
                 int(raw.get("internalDate", 0)) / 1000, tz=timezone.utc
             ).isoformat(),
+            "labels": sorted(labels),
+            # The half the queue never had. A record of what the user WROTE is
+            # what turns "unanswered" from a guess into a fact.
+            "direction": "outbound" if "SENT" in labels else "inbound",
         }
 
     # -- actions -------------------------------------------------------------
