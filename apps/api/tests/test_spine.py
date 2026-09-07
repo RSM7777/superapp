@@ -1759,3 +1759,264 @@ def test_auto_reply_never_answers_an_auto_reply_and_caps_per_thread():
         db.close()
     finally:
         settings.gmail_scope_tier = prev
+
+
+
+def test_auto_reply_window_schedules_then_sends_at_deadline():
+    """A matched auto-reply no longer sends on the spot: the draft sits in
+    Needs you as auto_pending with a deadline (~60s), and send_due sends it
+    once the deadline passes, re-gated on its current body."""
+    import superapp.config as config_module
+    from superapp import autosend
+    from superapp.agents.base import run_think
+    from superapp.models import Event, InboxDraft, InboxMessage, utcnow
+    from superapp.routers.inbox import set_auto_reply
+    from superapp.substrate.inbox import upsert_account
+
+    settings = config_module.get_settings()
+    prev = settings.gmail_scope_tier
+    settings.gmail_scope_tier = "send"
+    autosend.TIMERS_ENABLED = False
+    uid = "window-tester"
+    try:
+        db = SessionLocal()
+        upsert_account(db, user_id=uid, email="stub@example.com")
+        # enough known mail that the sync does not treat the mailbox as a backfill
+        for i in range(15):
+            db.add(InboxMessage(user_id=uid, account_email="stub@example.com",
+                                gmail_msg_id=f"win-old-{i}", thread_id=f"win-t-{i}",
+                                from_name="Old", from_addr="old@example.com", subject="old",
+                                body_text="old", tier="cleared", received_at=utcnow()))
+        set_auto_reply(db, uid, sender="priya@eureka.io", on=True)
+        db.commit()
+        run_think(db, agent="inbox", user_id=uid, trigger={"kind": "email_sync"})
+        db.commit()
+        m = db.scalar(select(InboxMessage).where(InboxMessage.user_id == uid,
+                                                 InboxMessage.from_addr == "priya@eureka.io"))
+        assert m is not None and m.tier == "needs_reply"
+        d = db.scalar(select(InboxDraft).where(InboxDraft.message_id == m.id))
+        assert d is not None and d.status == "auto_pending"
+        left = (d.auto_send_at.replace(tzinfo=None) - utcnow().replace(tzinfo=None)).total_seconds()
+        assert 50 <= left <= 61
+        assert db.scalar(select(Event).where(Event.user_id == uid,
+                                             Event.type == "draft_auto_scheduled")) is not None
+        # not due yet
+        assert autosend.send_due(db, user_id=uid) == 0
+        assert db.get(InboxDraft, d.id).status == "auto_pending"
+        # deadline passes -> it sends
+        from datetime import timedelta
+        d.auto_send_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+        assert autosend.send_due(db, user_id=uid) == 1
+        db.commit()
+        assert db.get(InboxDraft, d.id).status == "sent"
+        assert db.get(InboxMessage, m.id).tier == "worth_knowing"
+        ev = db.scalar(select(Event).where(Event.user_id == uid, Event.type == "draft_sent"))
+        assert ev is not None and ev.payload.get("auto") and ev.payload.get("window")
+        db.close()
+    finally:
+        settings.gmail_scope_tier = prev
+        autosend.TIMERS_ENABLED = True
+
+
+def test_auto_reply_window_edit_send_now_takeover_and_hold():
+    """Inside the window: an edit keeps the window (the edited words go
+    out), 'Send now' sends, 'I'll send it myself' turns it into an ordinary
+    ask, dismiss cancels it, and a body that gained a blank is held."""
+    import superapp.config as config_module
+    from datetime import timedelta
+
+    from superapp import autosend
+    from superapp.models import InboxDraft, InboxMessage, utcnow
+    from superapp.substrate.inbox import create_draft
+
+    settings = config_module.get_settings()
+    prev = settings.gmail_scope_tier
+    settings.gmail_scope_tier = "send"
+
+    def pending(n: int, body: str = "On it, see you there."):
+        db = SessionLocal()
+        m = InboxMessage(user_id="harshith", account_email="h@x.com",
+                         gmail_msg_id=f"win-{n}", thread_id=f"win-th-{n}", from_name="Win Tester",
+                         from_addr=f"win{n}@example.com", subject="hi", body_text="coming?",
+                         tier="needs_reply", note_kind="plans", received_at=utcnow())
+        db.add(m)
+        db.flush()
+        d = create_draft(db, user_id="harshith", message_id=m.id, body=body)
+        d.status = "auto_pending"
+        d.auto_send_at = utcnow() + timedelta(seconds=60)
+        db.commit()
+        ids = (m.id, d.id)
+        db.close()
+        return ids
+
+    try:
+        # state exposes the window
+        mid, did = pending(1)
+        row = next(a for a in client.get("/v1/inbox/state", headers=AUTH).json()["needs_reply"]
+                   if a["id"] == mid)
+        assert row["draft"]["status"] == "auto_pending" and 0 < row["draft"]["sending_in"] <= 60
+        # an edit keeps the window and the edited words are what go out
+        r = client.put(f"/v1/inbox/drafts/{did}", headers=AUTH, json={"body": "Edited, see you there."})
+        assert r.status_code == 200
+        db = SessionLocal()
+        d = db.get(InboxDraft, did)
+        assert d.status == "auto_pending" and d.auto_send_at is not None and d.edited_at is not None
+        assert d.body == "Edited, see you there."
+        d.auto_send_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+        assert autosend.send_due(db, draft_id=did) == 1
+        db.commit()
+        d = db.get(InboxDraft, did)
+        assert d.status == "sent" and d.body == "Edited, see you there."
+        from superapp.models import Event
+        ev = [e for e in db.scalars(select(Event).where(Event.user_id == "harshith",
+                                                          Event.type == "draft_sent"))
+              if e.payload.get("draft_id") == did]
+        assert ev and ev[0].payload.get("window") is True
+        db.close()
+        # send now (a fresh window): the tap claims it, the timer/backstop cannot
+        mid, did = pending(5)
+        r = client.post(f"/v1/inbox/drafts/{did}/send", headers=AUTH)
+        assert r.status_code == 200
+        db = SessionLocal()
+        d = db.get(InboxDraft, did)
+        assert d.status == "sent" and d.auto_send_at is None
+        assert autosend.send_due(db, draft_id=did) == 0
+        db.close()
+        # an in-window edit followed by Send now is an EDITED verdict, not a clean one
+        mid, did = pending(6)
+        client.put(f"/v1/inbox/drafts/{did}", headers=AUTH, json={"body": "Rewritten by me."})
+        client.post(f"/v1/inbox/drafts/{did}/send", headers=AUTH)
+        db = SessionLocal()
+        from superapp.models import Decision
+        dec = db.scalars(select(Decision).where(Decision.user_id == "harshith",
+                                                 Decision.action_key == "inbox.send_reply")
+                         .order_by(Decision.created_at.desc())).first()
+        assert dec is not None and dec.verdict == "edited"
+        db.close()
+
+        # take over
+        mid, did = pending(2)
+        r = client.post(f"/v1/inbox/drafts/{did}/manual", headers=AUTH)
+        assert r.status_code == 200
+        db = SessionLocal()
+        d = db.get(InboxDraft, did)
+        assert d.status == "waiting" and d.auto_send_at is None
+        d.auto_send_at = utcnow() - timedelta(seconds=1)   # even if a stale deadline lingered
+        db.commit()
+        assert autosend.send_due(db, user_id="harshith") == 0
+        db.close()
+
+        # dismiss cancels
+        mid, did = pending(3)
+        assert client.post(f"/v1/inbox/drafts/{did}/dismiss", headers=AUTH).status_code == 200
+        db = SessionLocal()
+        assert db.get(InboxDraft, did).status == "dismissed"
+        db.close()
+
+        # a blank that appeared inside the window holds it at the deadline
+        mid, did = pending(4, body="Sure, [time] works.")
+        db = SessionLocal()
+        d = db.get(InboxDraft, did)
+        d.auto_send_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+        assert autosend.send_due(db, draft_id=did) == 0
+        db.commit()
+        assert db.get(InboxDraft, did).status == "waiting"
+        db.close()
+    finally:
+        settings.gmail_scope_tier = prev
+
+
+
+def test_auto_reply_window_claim_is_exclusive_and_survives_uncommitted_sync():
+    """Only one sender wins a due draft (timer, sync backstop, dispatcher or
+    'Send now'); a draft scheduled inside a still-open sync transaction is
+    invisible to other sessions until commit; a crash between claim and send
+    is reclaimable after a few minutes."""
+    import superapp.config as config_module
+    from datetime import timedelta
+
+    from superapp import autosend
+    from superapp.models import InboxDraft, InboxMessage, utcnow
+    from superapp.substrate.inbox import create_draft
+
+    settings = config_module.get_settings()
+    prev = settings.gmail_scope_tier
+    settings.gmail_scope_tier = "send"
+    autosend.TIMERS_ENABLED = False
+    try:
+        # exclusive claim: a second caller sees a claimed row and sends nothing
+        db = SessionLocal()
+        m = InboxMessage(user_id="harshith", account_email="h@x.com", gmail_msg_id="claim-1",
+                         thread_id="claim-t-1", from_name="Claim", from_addr="claim@example.com",
+                         subject="hi", body_text="coming?", tier="needs_reply", note_kind="plans",
+                         received_at=utcnow())
+        db.add(m)
+        db.flush()
+        d = create_draft(db, user_id="harshith", message_id=m.id, body="On my way.")
+        d.status = "auto_pending"
+        d.auto_send_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+        did = d.id
+        assert autosend.claim(db, did) is True          # first caller wins
+        assert autosend.claim(db, did) is False         # second caller loses
+        other = SessionLocal()
+        assert autosend.send_due(other, draft_id=did) == 0   # a fresh session also loses
+        other.close()
+        # while claimed (mid-send) every user action is refused, not doubled
+        assert client.post(f"/v1/inbox/drafts/{did}/send", headers=AUTH).status_code == 409
+        assert client.post(f"/v1/inbox/drafts/{did}/dismiss", headers=AUTH).status_code == 409
+        assert client.post(f"/v1/inbox/drafts/{did}/manual", headers=AUTH).status_code == 409
+        from superapp.routers.voice import _execute
+        assert "on its way" in _execute(db, "harshith", {"action_type": "send_draft", "draft_id": did})["say"]
+        # a claim that goes stale (a crash mid-send) is never re-sent: the first
+        # attempt may have reached Gmail. It goes back to the person, flagged.
+        d = db.get(InboxDraft, did)
+        d.claimed_at = utcnow() - timedelta(minutes=autosend.STALE_CLAIM_MINUTES + 1)
+        db.commit()
+        assert autosend.send_due(db, draft_id=did) == 0
+        db.commit()
+        d = db.get(InboxDraft, did)
+        assert d.status == "waiting" and d.claimed_at is None and d.auto_send_at is None
+        from superapp.models import Event
+        assert any(e.payload.get("draft_id") == did for e in db.scalars(
+            select(Event).where(Event.user_id == "harshith", Event.type == "draft_auto_uncertain")))
+        db.close()
+
+        # schedule() announces and arms only AFTER the caller commits, so a
+        # sync that rolls back never advertises a window and a timer never
+        # fires into an uncommitted row. (Cross-session invisibility itself
+        # cannot be modelled here: the test DB is one shared SQLite connection.)
+        calls: list[str] = []
+        orig_announce, orig_arm = autosend.announce, autosend.arm
+        autosend.announce = lambda *a, **k: calls.append("announce")
+        autosend.arm = lambda *a, **k: calls.append("arm")
+        try:
+            db = SessionLocal()
+            m = InboxMessage(user_id="harshith", account_email="h@x.com", gmail_msg_id="claim-2",
+                             thread_id="claim-t-2", from_name="Claim", from_addr="claim2@example.com",
+                             subject="hi", body_text="coming?", tier="needs_reply", note_kind="plans",
+                             received_at=utcnow())
+            db.add(m)
+            db.flush()
+            d = create_draft(db, user_id="harshith", message_id=m.id, body="Yes.")
+            autosend.schedule(db, draft=d, msg=m, gate_tier=1)
+            assert d.status == "auto_pending" and d.auto_send_at is not None
+            assert calls == []                       # nothing leaves the open transaction
+            db.commit()
+            assert calls == ["announce", "arm"]      # the after_commit hook ran exactly once
+            db.commit()
+            assert calls == ["announce", "arm"]      # ...and not again
+            d.auto_send_at = utcnow() - timedelta(seconds=1)
+            db.commit()
+            assert autosend.send_due(db, draft_id=d.id) == 1
+            db.commit()
+            assert db.get(InboxDraft, d.id).status == "sent"
+            db.close()
+        finally:
+            autosend.announce, autosend.arm = orig_announce, orig_arm
+    finally:
+        settings.gmail_scope_tier = prev
+        autosend.TIMERS_ENABLED = True

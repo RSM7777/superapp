@@ -315,6 +315,14 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
     result = ThinkResult()
     counts = {"new": 0, "needs_reply": 0, "worth_knowing": 0, "receipt": 0, "cleared": 0, "archived": 0}
 
+    # Backstop for the auto-reply grace window: anything whose deadline
+    # passed while the process was down goes out now, before new mail.
+    try:
+        from ..autosend import send_due as _send_due
+        _send_due(db, user_id=context.user_id)
+    except Exception:  # noqa: BLE001
+        pass
+
     for acct in accounts(db, context.user_id):
         token = get_token(db, user_id=context.user_id, provider=f"gmail:{acct.email}")
         client = GmailClient(json.loads(token) if token else None)
@@ -419,43 +427,11 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                         and not draft_leaks_new_destination(
                             draft.body, msg.body_text,
                             allowed=f"{msg.from_addr} {msg.account_email}")):
-                    from ..push import live_activity as _la
-                    _AR_STEPS = ["Reading", "Drafting", "Sending", "Sent"]
-                    _la(db, user_id=context.user_id, event="start",
-                        title="Auto-reply",
-                        state={"status": f"Replying to {msg.from_name}",
-                               "stage": f"Replying to {msg.from_name}",
-                               "steps": _AR_STEPS, "stepIndex": 2,
-                               "quoteLabel": "WHAT'S GOING OUT",
-                               "quote": draft.body[:140]})
-                    try:
-                        sent_id = client.send_reply(
-                            to_addr=msg.from_addr, subject=msg.subject,
-                            body=draft.body, thread_id=msg.thread_id, auto=True)
-                        _la(db, user_id=context.user_id, event="end",
-                            state={"status": "Sent.",
-                                   "stage": f"Sent to {msg.from_name}.",
-                                   "steps": _AR_STEPS, "stepIndex": 3})
-                        from ..models import utcnow as _utcnow
-                        draft.status = "sent"
-                        draft.sent_at = _utcnow()
-                        msg.tier = "worth_knowing"
-                        result.event_writes.append(EventWrite(
-                            type="draft_sent", domain="inbox",
-                            payload={"draft_id": draft.id, "gmail_sent_id": sent_id,
-                                     "auto": True, "kind": msg.note_kind}))
-                        record_decision(db, user_id=context.user_id, agent="inbox",
-                                        action_key="inbox.auto_reply", decided_by="nano",
-                                        verdict="acted",
-                                        payload={"draft_id": draft.id, "kind": msg.note_kind,
-                                                 "risk_tier": gate.tier,
-                                                 "provenance": "email"})
-                    except Exception:  # noqa: BLE001
-                        # Send failed: the draft simply waits like any other —
-                        # but end the lock-screen activity so it can't linger.
-                        _la(db, user_id=context.user_id, event="end",
-                            state={"status": "Held for you.", "stage": "Held for you.",
-                                   "steps": _AR_STEPS, "stepIndex": 2})
+                    # Not sent on the spot: the draft sits in Needs you for
+                    # the grace window (editable, cancellable), the lock
+                    # screen counts down, and then it sends itself.
+                    from ..autosend import schedule as _schedule_auto
+                    _schedule_auto(db, draft=draft, msg=msg, gate_tier=gate.tier)
             counts[msg.tier] += 1
             # Nano's own verdicts go in the ledger too — the "did without
             # asking" side of the autonomy panel is counted, never estimated.

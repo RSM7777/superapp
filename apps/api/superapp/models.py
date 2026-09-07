@@ -383,8 +383,16 @@ class InboxDraft(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     message_id: Mapped[str] = mapped_column(String(36), nullable=False)  # inbox_messages.id
     body: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(16), default="waiting")  # waiting | edited | sent | dismissed
+    status: Mapped[str] = mapped_column(String(16), default="waiting")  # waiting | edited | auto_pending | sent | dismissed
     defer_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # auto_pending only: when the grace window closes and it sends itself.
+    auto_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set whenever the person rewrote the words (also inside a window, where
+    # status stays auto_pending), so "sent as written" verdicts stay honest.
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # auto_sending only: when a sender claimed the row. Staleness (a crash
+    # mid-send) is measured from here, never from the deadline.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

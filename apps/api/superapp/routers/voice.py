@@ -352,7 +352,12 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
                              payload={"draft_id": draft.id, "before": draft.body[:2000],
                                       "after": parsed["reply_body"][:2000], "via": "voice"})
                 draft.body = parsed["reply_body"]
-                draft.status = "edited"
+                draft.edited_at = utcnow()
+                if draft.status != "auto_pending":   # an edit inside the window keeps it
+                    draft.status = "edited"
+                else:
+                    from ..autosend import refresh_activity
+                    refresh_activity(db, draft, msg)
             except ValueError:
                 return {"say": "I couldn't find that draft."}
         else:
@@ -634,15 +639,39 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
             return {"say": "I couldn't find that draft."}
         if draft.status == "sent":
             return {"say": "That one already went out."}
-        was_edited = draft.status == "edited"
+        if draft.status == "auto_sending":
+            return {"say": "That one is already on its way."}
+        was_edited = draft.status == "edited" or draft.edited_at is not None
+        was_auto = draft.status == "auto_pending"
+        if was_auto:
+            from ..autosend import claim
+            if not claim(db, draft.id):
+                return {"say": "That one is already on its way."}
+            draft.status = "auto_sending"
         msg = db.get(InboxMessage, draft.message_id)
         token = get_token(db, user_id=user_id, provider=f"gmail:{msg.account_email}")
         client = GmailClient(json.loads(token) if token else None)
-        sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
-                                    body=draft.body, thread_id=msg.thread_id)
+        try:
+            sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
+                                        body=draft.body, thread_id=msg.thread_id)
+        except Exception:
+            if was_auto:
+                draft.status = "waiting"
+                draft.auto_send_at = None
+                draft.claimed_at = None
+                db.commit()
+                from ..autosend import end_activity_held
+                end_activity_held(db, user_id)
+            raise
         draft.status = "sent"
         draft.sent_at = utcnow()
+        draft.auto_send_at = None
+        draft.claimed_at = None
         msg.settled = True
+        if was_auto:
+            db.commit()
+            from ..autosend import end_activity_sent
+            end_activity_sent(db, user_id, msg.from_name)
         append_event(db, user_id=user_id, type="draft_sent", agent="orb", domain="inbox",
                      payload={"draft_id": draft.id, "gmail_sent_id": sent_id,
                               "edited": was_edited, "via": "voice"})

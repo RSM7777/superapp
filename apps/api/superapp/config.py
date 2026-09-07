@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     # Trust ladder: read (triage only) -> send (drafts sendable) -> modify
     # (auto-archive the cleared tier for real). Climb it deliberately.
     gmail_scope_tier: str = "read"
+    # The auto-reply grace window: seconds a matched draft waits in Needs you
+    # (editable, cancellable) before it sends itself. 0 = send on the spot.
+    auto_reply_delay_seconds: int = 60
     # Secret path token for the Pub/Sub push webhook (Google can't send our bearer).
     gmail_webhook_token: str = "change-me-gmail-webhook"
     # Pub/Sub topic for Gmail watch, e.g. projects/<proj>/topics/gmail-push. Empty = polling only.

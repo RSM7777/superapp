@@ -40,7 +40,10 @@ const CAT_COLORS: Record<string, string> = {
   "Other noise": "#6B6880",
 };
 
-type Draft = { id: string; body: string; status: string; deferred?: boolean };
+type Draft = {
+  id: string; body: string; status: string; deferred?: boolean;
+  auto_send_at?: string | null; sending_in?: number | null;
+};
 type Ask = {
   id: string; from_name: string; from_addr?: string; box?: string; subject: string; gist: string;
   why_now: string; kind: string; received_at: string; body: string; draft: Draft | null;
@@ -138,7 +141,36 @@ export function InboxScreen({
     return () => { alive.current = false; clearInterval(t); };
   }, [refresh]);
 
-  const draftAction = useCallback(async (draftId: string, action: "send" | "defer" | "dismiss") => {
+  // The auto-reply grace window: a one-second clock while any card is
+  // counting down, so "Sending in 0:42" moves without a network round-trip.
+  const [, setClock] = useState(0);
+  const anyPending = !!state?.needs_reply.some((a) => a.draft?.status === "auto_pending");
+  useEffect(() => {
+    if (!anyPending) return;
+    const t = setInterval(() => setClock((c) => c + 1), 1000);
+    return () => clearInterval(t);
+  }, [anyPending]);
+  const secondsLeft = (d: Draft): number | null => {
+    if (d.status !== "auto_pending" || !d.auto_send_at) return null;
+    return Math.max(0, Math.round((Date.parse(d.auto_send_at) - Date.now()) / 1000));
+  };
+  const overdueBy = (d: Draft): number =>
+    d.auto_send_at ? Math.max(0, Math.round((Date.now() - Date.parse(d.auto_send_at)) / 1000)) : 0;
+  const inFlight = (d: Draft) => d.status === "auto_sending" || secondsLeft(d) === 0;
+  const mmss = (n: number) => `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
+  // A countdown that reached zero is reconciled with the server every 2s
+  // (bounded), whichever card is open, until the draft has left the window.
+  const zeroPolls = useRef(0);
+  const anyAtZero = !!state?.needs_reply.some((a) => a.draft && inFlight(a.draft));
+  useEffect(() => {
+    if (!anyAtZero) { zeroPolls.current = 0; return; }
+    if (zeroPolls.current >= 10) return;
+    const t = setTimeout(() => { zeroPolls.current += 1; refresh(); }, 2000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyAtZero, state, refresh]);
+
+  const draftAction = useCallback(async (draftId: string, action: "send" | "defer" | "dismiss" | "manual") => {
     if (busyDraft) return;
     setBusyDraft(draftId);
     try {
@@ -149,10 +181,12 @@ export function InboxScreen({
           ? JSON.stringify({ tz_offset_minutes: new Date().getTimezoneOffset() })
           : undefined,
       });
-      if ((res.ok || res.status === 409) && action === "send") {
+      // Only a confirmed send is "sent"; a 409 means another sender has it
+      // (or it was held), so the refresh decides what the card shows.
+      if (res.ok && action === "send") {
         setSentLocal((s0) => new Set(s0).add(draftId));
       }
-      setTimeout(refresh, 1200);
+      setTimeout(refresh, res.status === 409 ? 400 : 1200);
     } catch { /* refresh reconciles */ } finally {
       if (alive.current) setBusyDraft(null);
     }
@@ -281,7 +315,12 @@ export function InboxScreen({
           ) : (
             <View style={{ gap: 10 }}>
               {asks.map((a, i) => {
-                const sent = a.draft ? sentLocal.has(a.draft.id) || a.draft.status === "sent" : false;
+                // The server's word wins once it has one: a local "sent" mark only
+                // bridges the gap until the next refresh, never overrides a held draft.
+                const sent = a.draft
+                  ? a.draft.status === "sent"
+                    || (sentLocal.has(a.draft.id) && !["waiting", "edited", "dismissed"].includes(a.draft.status))
+                  : false;
                 const expanded = openMail === a.id || asks.length === 1;
                 const autoOn = a.kind
                   ? state.auto_reply_kinds.some((k) => k.toLowerCase() === a.kind.toLowerCase())
@@ -310,7 +349,13 @@ export function InboxScreen({
                         </View>
                         <Text style={s.subject} numberOfLines={1}>{a.subject}</Text>
                       </View>
-                      {a.why_now ? (
+                      {a.draft && !sent && (secondsLeft(a.draft) !== null || inFlight(a.draft)) ? (
+                        <View style={[s.chip, s.chipAuto]}>
+                          <Text style={[s.chipText, { color: C.lav }]}>
+                            {inFlight(a.draft) ? "SENDING…" : `AUTO ${mmss(secondsLeft(a.draft)!)}`}
+                          </Text>
+                        </View>
+                      ) : a.why_now ? (
                         <View style={s.chip}><Text style={s.chipText}>{a.why_now.toUpperCase().slice(0, 14)}</Text></View>
                       ) : null}
                     </Pressable>
@@ -336,7 +381,43 @@ export function InboxScreen({
                           </View>
                         ) : null}
                         {a.gist ? <Text style={s.consequence}>{a.gist}</Text> : null}
-                        {a.draft && !sent ? (
+                        {a.draft && !sent && (secondsLeft(a.draft) !== null || inFlight(a.draft)) ? (
+                          // Inside the auto-reply window: it sends itself when
+                          // the clock hits zero unless the person steps in.
+                          <>
+                            {(() => {
+                              const left = secondsLeft(a.draft) ?? 0;
+                              const late = overdueBy(a.draft);
+                              const text = left > 0 ? `Sending itself in ${mmss(left)}`
+                                : late > 15 ? "Didn't send yet" : "Sending…";
+                              const hint = left > 0 ? "  ·  hold the card to edit it"
+                                : late > 15 ? "  ·  tap Send now" : "";
+                              return (
+                                <View style={s.autoStrip}>
+                                  <View style={s.autoDot} />
+                                  <Text style={s.autoStripText}>
+                                    {text}<Text style={{ color: "rgba(244,242,250,0.5)" }}>{hint}</Text>
+                                  </Text>
+                                </View>
+                              );
+                            })()}
+                            {a.draft.status === "auto_sending" || (secondsLeft(a.draft) === 0 && overdueBy(a.draft) <= 15) ? null : (
+                              <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+                                <Pressable style={s.sendBtn} disabled={busyDraft === a.draft.id}
+                                           onPress={() => draftAction(a.draft!.id, "send")}>
+                                  <Text style={s.sendText}>{busyDraft === a.draft.id ? "…" : "Send now"}</Text>
+                                </Pressable>
+                                <Pressable style={s.ghostBtn} onPress={() => draftAction(a.draft!.id, "manual")}>
+                                  <Text style={s.ghostText}>I'll send it</Text>
+                                </Pressable>
+                                <Pressable style={[s.ghostBtn, { borderColor: "rgba(255,255,255,0.12)" }]}
+                                           onPress={() => draftAction(a.draft!.id, "dismiss")}>
+                                  <Text style={[s.ghostText, { color: "rgba(244,242,250,0.6)" }]}>Dismiss</Text>
+                                </Pressable>
+                              </View>
+                            )}
+                          </>
+                        ) : a.draft && !sent ? (
                           <>
                             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
                               <Pressable style={s.sendBtn} disabled={busyDraft === a.draft.id}
@@ -551,6 +632,14 @@ const s = StyleSheet.create({
     paddingHorizontal: 10, paddingVertical: 5,
   },
   chipText: { fontFamily: MONO, fontSize: 10, letterSpacing: 0.8, color: C.rose },
+  chipAuto: { borderColor: "rgba(199,184,255,0.45)", backgroundColor: "rgba(199,184,255,0.10)" },
+  autoStrip: {
+    flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12,
+    paddingHorizontal: 12, paddingVertical: 9, borderRadius: 12,
+    backgroundColor: "rgba(199,184,255,0.08)", borderWidth: 1, borderColor: "rgba(199,184,255,0.22)",
+  },
+  autoDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.lav },
+  autoStripText: { color: C.lav, fontSize: 12.5, flex: 1 },
   theyWrote: {
     padding: 13, borderRadius: 16,
     backgroundColor: "rgba(255,255,255,0.035)", borderWidth: 1, borderColor: "rgba(255,255,255,0.09)",

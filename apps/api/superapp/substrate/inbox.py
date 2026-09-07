@@ -74,6 +74,8 @@ def inbox_context(db: Session, user_id: str) -> dict:
     def row(m: InboxMessage) -> dict:
         d = drafts.get(m.id)
         deferred = bool(d and d.defer_until and aware(d.defer_until) > now)
+        auto_at = (aware(d.auto_send_at) if d and d.status == "auto_pending" and d.auto_send_at
+                   else None)
         return {
             "id": m.id, "from_name": m.from_name, "from_addr": m.from_addr,
             "box": m.account_email,
@@ -84,7 +86,10 @@ def inbox_context(db: Session, user_id: str) -> dict:
             "received_at": aware(m.received_at).isoformat(),
             "prior_from_sender": from_counts.get(m.from_addr, 1) - 1,
             "body": _clean(m.body_text or "")[:2500],
-            "draft": {"id": d.id, "body": d.body, "status": d.status, "deferred": deferred} if d else None,
+            "draft": {"id": d.id, "body": d.body, "status": d.status, "deferred": deferred,
+                      "auto_send_at": auto_at.isoformat() if auto_at else None,
+                      "sending_in": max(0, int((auto_at - now).total_seconds())) if auto_at else None,
+                      } if d else None,
         }
 
     mutes = rules_fact(db, user_id, "mutes")

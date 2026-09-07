@@ -144,7 +144,15 @@ def edit_draft(draft_id: str, body: DraftEdit, user_id: str = Depends(current_us
     append_event(db, user_id=user_id, type="draft_edited", agent="inbox", domain="inbox",
                  payload={"draft_id": draft.id, "before": draft.body[:2000], "after": body.body[:2000]})
     draft.body = body.body
-    draft.status = "edited"
+    from ..models import utcnow as _utcnow
+    draft.edited_at = _utcnow()
+    if draft.status != "auto_pending":   # an edit inside the window keeps the window
+        draft.status = "edited"
+    else:
+        from ..autosend import refresh_activity
+        msg = db.get(InboxMessage, draft.message_id)
+        if msg is not None:
+            refresh_activity(db, draft, msg)   # the lock screen shows the new words
     db.commit()
     return {"ok": True}
 
@@ -159,17 +167,42 @@ def send_draft(draft_id: str, user_id: str = Depends(current_user_id), db: Sessi
     draft = get_draft(db, user_id=user_id, draft_id=draft_id)
     if draft.status == "sent":
         raise HTTPException(status_code=409, detail="Already sent")
-    was_edited = draft.status == "edited"
+    if draft.status == "auto_sending":
+        raise HTTPException(status_code=409, detail="Already on its way")
+    was_edited = draft.status == "edited" or draft.edited_at is not None
+    was_auto = draft.status == "auto_pending"   # "Send now" inside the window
+    if was_auto:
+        # Exactly one sender wins the draft: the tap, the timer or a backstop.
+        from ..autosend import claim
+        if not claim(db, draft.id):
+            raise HTTPException(status_code=409, detail="Already on its way")
+        draft.status = "auto_sending"
     msg = db.get(InboxMessage, draft.message_id)
     token = get_token(db, user_id=user_id, provider=f"gmail:{msg.account_email}")
     client = GmailClient(json.loads(token) if token else None)
-    sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
-                                body=draft.body, thread_id=msg.thread_id)
+    try:
+        sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
+                                    body=draft.body, thread_id=msg.thread_id)
+    except Exception:
+        if was_auto:   # give it back as an ordinary ask rather than strand it
+            draft.status = "waiting"
+            draft.auto_send_at = None
+            draft.claimed_at = None
+            db.commit()
+            from ..autosend import end_activity_held
+            end_activity_held(db, user_id)
+        raise
     from ..kernel import record_decision
     from ..models import utcnow
     draft.status = "sent"
     draft.sent_at = utcnow()
+    draft.auto_send_at = None
+    draft.claimed_at = None
     msg.settled = True
+    if was_auto:
+        db.commit()   # the send is real; make the status durable now
+        from ..autosend import end_activity_sent
+        end_activity_sent(db, user_id, msg.from_name)
     append_event(db, user_id=user_id, type="draft_sent", agent="inbox", domain="inbox",
                  payload={"draft_id": draft.id, "gmail_sent_id": sent_id, "edited": was_edited})
     from ..llm.provider import LLMProvider
@@ -205,6 +238,22 @@ def undefer_draft(draft_id: str, user_id: str = Depends(current_user_id), db: Se
     return render_screen(db, agent="inbox", user_id=user_id).model_dump()
 
 
+@router.post("/inbox/drafts/{draft_id}/manual")
+def manual_draft(draft_id: str, user_id: str = Depends(current_user_id),
+                 db: Session = Depends(get_db)):
+    """'I'll send it myself': the auto-reply window closes and the draft
+    becomes an ordinary ask waiting for the person's tap."""
+    from ..autosend import cancel as _cancel_auto
+    draft = get_draft(db, user_id=user_id, draft_id=draft_id)
+    if draft.status == "sent":
+        raise HTTPException(status_code=409, detail="Already sent")
+    if draft.status == "auto_sending":
+        raise HTTPException(status_code=409, detail="Already on its way")
+    _cancel_auto(db, draft, reason="manual")
+    db.commit()
+    return render_screen(db, agent="inbox", user_id=user_id).model_dump()
+
+
 @router.post("/inbox/drafts/{draft_id}/defer")
 def defer_draft(draft_id: str, body: DeferBody | None = None,
                 user_id: str = Depends(current_user_id), db: Session = Depends(get_db)):
@@ -212,6 +261,10 @@ def defer_draft(draft_id: str, body: DeferBody | None = None,
     from datetime import datetime, time, timedelta, timezone
 
     draft = get_draft(db, user_id=user_id, draft_id=draft_id)
+    if draft.status == "auto_sending":
+        raise HTTPException(status_code=409, detail="Already on its way")
+    from ..autosend import cancel as _cancel_auto
+    _cancel_auto(db, draft, reason="deferred")   # "later" is never "send itself"
     offset = timedelta(minutes=(body.tz_offset_minutes if body else 0))
     now_local = datetime.now(timezone.utc) - offset
     six_pm_local = datetime.combine(now_local.date(), time(18, 0))
@@ -246,6 +299,13 @@ def inbox_state(user_id: str = Depends(current_user_id), db: Session = Depends(g
     with a category breakdown — plus sent mail and the sync stamp."""
     from ..substrate.inbox import inbox_context
 
+    # The app's own polls are a backstop for auto-reply windows that closed
+    # while no timer was alive (a restart inside the window).
+    try:
+        from ..autosend import send_due
+        send_due(db, user_id=user_id)
+    except Exception:  # noqa: BLE001
+        pass
     data = inbox_context(db, user_id)
     by_reason = dict(data.get("cleared_by_reason", {}))
     receipts = len(data.get("receipts", []))
@@ -321,6 +381,10 @@ def dismiss_draft(draft_id: str, user_id: str = Depends(current_user_id),
     draft = get_draft(db, user_id=user_id, draft_id=draft_id)
     if draft.status == "sent":
         raise HTTPException(status_code=409, detail="Already sent")
+    if draft.status == "auto_sending":
+        raise HTTPException(status_code=409, detail="Already on its way")
+    from ..autosend import cancel as _cancel_auto
+    _cancel_auto(db, draft, reason="dismissed")
     draft.status = "dismissed"
     msg = db.get(InboxMessage, draft.message_id)
     if msg is not None:

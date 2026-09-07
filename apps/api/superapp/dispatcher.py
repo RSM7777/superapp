@@ -88,7 +88,13 @@ def dispatch_tick(db: Session) -> dict:
                               "goal": camp.goal[:200]})
         campaigns_queued += 1
 
-    return {"reclaimed": reclaimed, "campaigns_queued": campaigns_queued}
+    # Auto-reply windows that closed while nothing else was running.
+    try:
+        from .autosend import send_due
+        auto_sent = send_due(db)
+    except Exception:  # noqa: BLE001
+        auto_sent = 0
+    return {"reclaimed": reclaimed, "campaigns_queued": campaigns_queued, "auto_sent": auto_sent}
 
 
 def settle_campaign_check(db: Session, task: AgentTask, result: dict,

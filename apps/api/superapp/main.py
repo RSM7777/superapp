@@ -13,6 +13,11 @@ from .routers import auth as auth_router, interview as interview_router, finance
 async def lifespan(app: FastAPI):
     # Dev convenience; real schema management is Alembic (`alembic upgrade head`).
     Base.metadata.create_all(bind=engine)
+    try:  # auto-reply windows that were open when the process last stopped
+        from .autosend import rearm_all
+        rearm_all()
+    except Exception:  # noqa: BLE001
+        pass
     yield
 
 
