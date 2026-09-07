@@ -143,7 +143,8 @@ def edit_draft(draft_id: str, body: DraftEdit, user_id: str = Depends(current_us
     # The edit diff is the voice-learning signal (roadmap §Phase 3).
     append_event(db, user_id=user_id, type="draft_edited", agent="inbox", domain="inbox",
                  payload={"draft_id": draft.id, "before": draft.body[:2000], "after": body.body[:2000]})
-    draft.body = body.body
+    from ..substrate.inbox import mark_written_by_user
+    mark_written_by_user(draft, body.body)   # a person's words are ready by definition
     from ..models import utcnow as _utcnow
     draft.edited_at = _utcnow()
     if draft.status != "auto_pending":   # an edit inside the window keeps the window
@@ -169,6 +170,11 @@ def send_draft(draft_id: str, user_id: str = Depends(current_user_id), db: Sessi
         raise HTTPException(status_code=409, detail="Already sent")
     if draft.status == "auto_sending":
         raise HTTPException(status_code=409, detail="Already on its way")
+    from ..substrate.inbox import draft_unsendable
+    why = draft_unsendable(draft)
+    if why:
+        # The tap approves words; it cannot approve an absence of them.
+        raise HTTPException(status_code=422, detail=f"Nothing to send: {why}. Write the reply first.")
     was_edited = draft.status == "edited" or draft.edited_at is not None
     was_auto = draft.status == "auto_pending"   # "Send now" inside the window
     if was_auto:
@@ -496,6 +502,9 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
             continue  # the loop backstop: this thread has had its auto-replies today
         if not assess("inbox.auto_reply", provenance="user").allowed:
             continue
+        from ..substrate.inbox import draft_unsendable
+        if draft_unsendable(d):
+            continue  # a refusal, a failure, a legacy stub, or no words at all never sends
         if has_placeholder(d.body):
             continue  # a [time]-style blank is unfinished writing; the user fills it
         if draft_leaks_new_destination(d.body, msg.body_text or "",

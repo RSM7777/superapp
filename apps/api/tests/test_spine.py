@@ -2235,3 +2235,147 @@ def test_production_refuses_a_stub_brain():
         assert_llm_configured(s)          # dev explicitly allows stub mode
     finally:
         s.allow_stub_llm, s.anthropic_api_key = prev
+
+
+
+def _intercept_gmail(monkeypatch):
+    """Record every send instead of reaching Gmail."""
+    from superapp.inbox.gmail_client import GmailClient
+    calls = []
+
+    def fake(self, *, to_addr, subject, body, thread_id, auto=False):
+        calls.append({"to": to_addr, "body": body, "auto": auto})
+        return f"sent-{len(calls)}"
+    monkeypatch.setattr(GmailClient, "send_reply", fake)
+    return calls
+
+
+def _needs_reply(db, uid, gmail_msg_id, kind="recruiter pings"):
+    from superapp.models import InboxMessage, utcnow
+    m = InboxMessage(user_id=uid, account_email="h@x.com", gmail_msg_id=gmail_msg_id,
+                     thread_id=f"t-{gmail_msg_id}", from_name="Recruiter Rita",
+                     from_addr="rita@firm.example", subject="quick call?",
+                     body_text="Are you free Tuesday?", tier="needs_reply",
+                     note_kind=kind, received_at=utcnow())
+    db.add(m); db.flush()
+    return m
+
+
+def test_enabling_autoreply_skips_unfinished_drafts(monkeypatch):
+    """Turning on a rule sweeps what is already waiting — but only what was
+    actually written. An empty refused draft and a legacy '(stub draft)' row
+    marked failed both stay put; the one real draft goes."""
+    import superapp.config as config_module
+    from superapp.models import InboxDraft
+    from superapp.substrate.inbox import create_draft
+    calls = _intercept_gmail(monkeypatch)
+    settings = config_module.get_settings(); settings.gmail_scope_tier = "send"
+    try:
+        db = SessionLocal()
+        kind = "sweep-test pings"
+        refused = create_draft(db, user_id="harshith", message_id=_needs_reply(db, "harshith", "sw-1", kind).id,
+                               body="", generation_status="refused", generation_reason="the model declined")
+        legacy = create_draft(db, user_id="harshith", message_id=_needs_reply(db, "harshith", "sw-2", kind).id,
+                              body="Hi Rita — got it. Yes from my side; (stub draft)",
+                              generation_status="failed", generation_reason="legacy stub draft")
+        real = create_draft(db, user_id="harshith", message_id=_needs_reply(db, "harshith", "sw-3", kind).id,
+                            body="Thanks Rita, not looking right now.")
+        db.commit(); ids = (refused.id, legacy.id, real.id); db.close()
+
+        r = client.post("/v1/inbox/autoreply", headers=AUTH, json={"kind": kind}).json()
+        assert r["sent_now"] == 1
+        assert [c["body"] for c in calls] == ["Thanks Rita, not looking right now."]
+        db = SessionLocal()
+        assert db.get(InboxDraft, ids[0]).status == "waiting"
+        assert db.get(InboxDraft, ids[1]).status == "waiting"
+        assert db.get(InboxDraft, ids[2]).status == "sent"
+        db.close()
+    finally:
+        settings.gmail_scope_tier = "read"
+
+
+def test_manual_send_rejects_an_unfinished_draft(monkeypatch):
+    """The tap approves words; it cannot approve an absence of them."""
+    import superapp.config as config_module
+    from superapp.substrate.inbox import create_draft
+    calls = _intercept_gmail(monkeypatch)
+    settings = config_module.get_settings(); settings.gmail_scope_tier = "send"
+    try:
+        db = SessionLocal()
+        d = create_draft(db, user_id="harshith", message_id=_needs_reply(db, "harshith", "man-1").id,
+                         body="", generation_status="failed", generation_reason="no model configured")
+        db.commit(); did = d.id; db.close()
+        r = client.post(f"/v1/inbox/drafts/{did}/send", headers=AUTH)
+        assert r.status_code == 422 and "never finished" in r.json()["detail"]
+        assert calls == []
+    finally:
+        settings.gmail_scope_tier = "read"
+
+
+def test_human_edit_makes_an_unfinished_draft_sendable(monkeypatch):
+    """A person writing the words is the override: the edit marks the draft
+    ready, and the tap sends exactly those words."""
+    import superapp.config as config_module
+    from superapp.models import InboxDraft
+    from superapp.substrate.inbox import create_draft
+    calls = _intercept_gmail(monkeypatch)
+    settings = config_module.get_settings(); settings.gmail_scope_tier = "send"
+    try:
+        db = SessionLocal()
+        d = create_draft(db, user_id="harshith", message_id=_needs_reply(db, "harshith", "edit-1").id,
+                         body="", generation_status="refused", generation_reason="the model declined")
+        db.commit(); did = d.id; db.close()
+        assert client.put(f"/v1/inbox/drafts/{did}", headers=AUTH,
+                          json={"body": "Thanks Rita — Tuesday at 10 works."}).status_code == 200
+        db = SessionLocal()
+        assert db.get(InboxDraft, did).generation_status == "ready"
+        db.close()
+        assert client.post(f"/v1/inbox/drafts/{did}/send", headers=AUTH).status_code == 200
+        assert [c["body"] for c in calls] == ["Thanks Rita — Tuesday at 10 works."]
+    finally:
+        settings.gmail_scope_tier = "read"
+
+
+def _voice(action, **fields):
+    base = {"say": "", "action_type": action, "screen": "", "draft_id": "", "message_id": "",
+            "reply_body": "", "to_addr": "", "subject": "", "profile_json": "",
+            "mute_kind": "", "mute_sender": "", "priority_kind": "", "priority_sender": "",
+            "listen": False}
+    base.update(fields)
+    return base
+
+
+def test_voice_send_refuses_an_unfinished_draft(monkeypatch):
+    import superapp.config as config_module
+    from superapp.routers.voice import _execute
+    from superapp.substrate.inbox import create_draft
+    calls = _intercept_gmail(monkeypatch)
+    settings = config_module.get_settings(); settings.gmail_scope_tier = "send"
+    try:
+        db = SessionLocal()
+        d = create_draft(db, user_id="harshith", message_id=_needs_reply(db, "harshith", "vs-1").id,
+                         body="", generation_status="failed", generation_reason="no model configured")
+        db.commit()
+        out = _execute(db, "harshith", _voice("send_draft", draft_id=d.id))
+        assert "never written" in out["say"]
+        assert calls == []
+        db.close()
+    finally:
+        settings.gmail_scope_tier = "read"
+
+
+def test_voice_rewrite_makes_a_draft_ready():
+    from superapp.models import InboxDraft
+    from superapp.routers.voice import _execute
+    from superapp.substrate.inbox import create_draft
+    db = SessionLocal()
+    m = _needs_reply(db, "harshith", "vr-1")
+    d = create_draft(db, user_id="harshith", message_id=m.id,
+                     body="", generation_status="refused", generation_reason="the model declined")
+    db.commit()
+    _execute(db, "harshith", _voice("draft_reply", message_id=m.id, draft_id=d.id,
+                                    reply_body="Thanks Rita, Tuesday works.\n\nHarshith"))
+    db.commit()
+    assert db.get(InboxDraft, d.id).generation_status == "ready"
+    assert db.get(InboxDraft, d.id).body.startswith("Thanks Rita")
+    db.close()

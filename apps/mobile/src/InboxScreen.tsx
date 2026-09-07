@@ -43,7 +43,12 @@ const CAT_COLORS: Record<string, string> = {
 type Draft = {
   id: string; body: string; status: string; deferred?: boolean;
   auto_send_at?: string | null; sending_in?: number | null;
+  generation?: string; generation_reason?: string;   // how the words came to be
 };
+// The server refused to invent words for this one (a refusal, an outage, a
+// blank it couldn't resolve). The card must not pretend Nano wrote back, and
+// the button must offer writing, not sending — the server would refuse anyway.
+const unfinished = (d: Draft) => !!d.generation && d.generation !== "ready";
 type Ask = {
   id: string; from_name: string; from_addr?: string; box?: string; subject: string; gist: string;
   why_now: string; kind: string; received_at: string; body: string; draft: Draft | null;
@@ -374,7 +379,17 @@ export function InboxScreen({
                           <View style={s.connLine} />
                           <Text style={{ color: "rgba(199,184,255,0.6)", fontSize: 11 }}>↓</Text>
                         </View>
-                        {a.draft ? (
+                        {a.draft && unfinished(a.draft) ? (
+                          <View style={s.nanoWrote}>
+                            <Text style={[s.panelLabel, { color: "rgba(240,193,112,0.9)" }]}>NANO COULDN'T FINISH THIS</Text>
+                            {a.draft.body.trim() ? (
+                              <Text style={[s.panelBody, { color: "rgba(244,242,250,0.84)" }]}>{a.draft.body}</Text>
+                            ) : null}
+                            <Text style={[s.panelBody, { color: "rgba(244,242,250,0.55)", marginTop: 6 }]}>
+                              {a.draft.generation_reason || "the model didn't finish"} — write it with Nano, or dismiss it.
+                            </Text>
+                          </View>
+                        ) : a.draft ? (
                           <View style={s.nanoWrote}>
                             <Text style={[s.panelLabel, { color: "rgba(199,184,255,0.9)" }]}>NANO WROTE BACK</Text>
                             <Text style={[s.panelBody, { color: "rgba(244,242,250,0.84)" }]}>{a.draft.body}</Text>
@@ -420,10 +435,21 @@ export function InboxScreen({
                         ) : a.draft && !sent ? (
                           <>
                             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
-                              <Pressable style={s.sendBtn} disabled={busyDraft === a.draft.id}
-                                         onPress={() => draftAction(a.draft!.id, "send")}>
-                                <Text style={s.sendText}>{busyDraft === a.draft.id ? "…" : "Send it"}</Text>
-                              </Pressable>
+                              {unfinished(a.draft) ? (
+                                <Pressable style={s.sendBtn}
+                                           onPress={() => onLongPressItem?.({
+                                             type: "decision", label: a.from_name, kind: a.kind || undefined,
+                                             fromAddr: a.from_addr, draftId: a.draft?.id,
+                                             onResolved: () => dropAsk(a.id),
+                                           })}>
+                                  <Text style={s.sendText}>Write it with Nano</Text>
+                                </Pressable>
+                              ) : (
+                                <Pressable style={s.sendBtn} disabled={busyDraft === a.draft.id}
+                                           onPress={() => draftAction(a.draft!.id, "send")}>
+                                  <Text style={s.sendText}>{busyDraft === a.draft.id ? "…" : "Send it"}</Text>
+                                </Pressable>
+                              )}
                               <Pressable style={s.ghostBtn} onPress={() => draftAction(a.draft!.id, "dismiss")}>
                                 <Text style={s.ghostText}>Dismiss</Text>
                               </Pressable>

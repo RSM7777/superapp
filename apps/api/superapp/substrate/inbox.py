@@ -52,6 +52,28 @@ def create_draft(db: Session, *, user_id: str, message_id: str, body: str,
     return draft
 
 
+def draft_unsendable(draft) -> str | None:
+    """Why this draft must not go out — None when it may. One rule for every
+    send path (the sync gate, the arming, the deadline re-check, the rule-enable
+    sweep, the tap, the spoken "send it"): words the model never finished, or
+    that nobody wrote, never leave. A person's own edit marks a draft ready."""
+    if getattr(draft, "generation_status", "ready") != "ready":
+        why = draft.generation_reason or draft.generation_status
+        return f"draft was never finished ({why})"
+    if not (draft.body or "").strip():
+        return "draft is empty"
+    return None
+
+
+def mark_written_by_user(draft, body: str) -> None:
+    """A person replaced the words: whatever the model failed to do no longer
+    matters, and the draft becomes sendable on their say-so."""
+    draft.body = body
+    if body.strip():
+        draft.generation_status = "ready"
+        draft.generation_reason = ""
+
+
 def get_draft(db: Session, *, user_id: str, draft_id: str) -> InboxDraft:
     draft = db.get(InboxDraft, draft_id)
     if draft is None or draft.user_id != user_id:

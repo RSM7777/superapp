@@ -441,13 +441,14 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                 # Auto-reply: a kind the user explicitly delegated sends
                 # itself; the exchange surfaces under Worth knowing — what
                 # came in and what went out — never silently.
+                from ..substrate.inbox import draft_unsendable as _unsendable
                 gate = assess("inbox.auto_reply", provenance="email",
                               suspicious=msg.suspicious)
                 if (msg.gmail_msg_id not in backfill_ids
                         and settings.gmail_scope_tier in ("send", "modify")
                         and _auto_reply_match(db, context.user_id, msg.note_kind, msg.from_addr)
                         and gate.allowed
-                        and draft.generation_status == "ready"  # a refusal, a failure or a blank never sends itself
+                        and _unsendable(draft) is None  # a refusal, a failure or a blank never sends itself
                         and not promoted  # a rule surfaced it; the model saw no ask to answer
                         and not raw.get("auto_submitted")  # never answer an auto-reply
                         and replies_sent_in_thread(db, user_id=context.user_id,
