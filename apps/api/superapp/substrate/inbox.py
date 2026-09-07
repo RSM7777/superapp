@@ -40,8 +40,13 @@ def insert_message(db: Session, *, user_id: str, account_email: str, msg: dict) 
     return row
 
 
-def create_draft(db: Session, *, user_id: str, message_id: str, body: str) -> InboxDraft:
-    draft = InboxDraft(user_id=user_id, message_id=message_id, body=body)
+def create_draft(db: Session, *, user_id: str, message_id: str, body: str,
+                 generation_status: str = "ready", generation_reason: str = "") -> InboxDraft:
+    """A draft the person wrote is `ready` by definition. One the model wrote
+    carries whatever the drafter reported — and anything but `ready` can never
+    send itself."""
+    draft = InboxDraft(user_id=user_id, message_id=message_id, body=body,
+                       generation_status=generation_status, generation_reason=generation_reason)
     db.add(draft)
     db.flush()
     return draft
@@ -87,6 +92,7 @@ def inbox_context(db: Session, user_id: str) -> dict:
             "prior_from_sender": from_counts.get(m.from_addr, 1) - 1,
             "body": _clean(m.body_text or "")[:2500],
             "draft": {"id": d.id, "body": d.body, "status": d.status, "deferred": deferred,
+                      "generation": d.generation_status, "generation_reason": d.generation_reason,
                       "auto_send_at": auto_at.isoformat() if auto_at else None,
                       "sending_in": max(0, int((auto_at - now).total_seconds())) if auto_at else None,
                       } if d else None,

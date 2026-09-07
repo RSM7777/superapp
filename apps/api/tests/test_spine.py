@@ -371,7 +371,10 @@ def test_phase3_connect_triage_tiers_and_receipts():
     needs = next(s for s in screen["sections"] if (s["title"] or "").startswith("Needs your words"))
     drafts = [b for b in needs["blocks"] if b["type"] == "draft_card"]
     assert len(drafts) >= 2  # Eureka deadline, Marcus lease, Amma
-    assert all(d["draft"] for d in drafts)  # written and waiting
+    # Written and waiting — or honestly unwritten. This test runs with no
+    # model, so the drafter must not invent a body; the card says so instead.
+    assert all(d["draft"] or "couldn't write" in (d["why_detail"] or "") for d in drafts)
+    assert any("couldn't write" in (d["why_detail"] or "") for d in drafts)
     assert any("deadline" in d["why"] or "waiting" in d["why"] for d in drafts)
     # Gmail-simple: one Primary list holds everything, expandable in place.
     assert any(t.startswith("Primary") for t in titles)
@@ -1762,7 +1765,7 @@ def test_auto_reply_never_answers_an_auto_reply_and_caps_per_thread():
 
 
 
-def test_auto_reply_window_schedules_then_sends_at_deadline():
+def test_auto_reply_window_schedules_then_sends_at_deadline(monkeypatch):
     """A matched auto-reply no longer sends on the spot: the draft sits in
     Needs you as auto_pending with a deadline (~60s), and send_due sends it
     once the deadline passes, re-gated on its current body."""
@@ -1778,6 +1781,7 @@ def test_auto_reply_window_schedules_then_sends_at_deadline():
     settings.gmail_scope_tier = "send"
     autosend.TIMERS_ENABLED = False
     uid = "window-tester"
+    _drafts_write_themselves(monkeypatch)   # the stub brain no longer writes a sendable draft
     try:
         db = SessionLocal()
         upsert_account(db, user_id=uid, email="stub@example.com")
@@ -2020,3 +2024,214 @@ def test_auto_reply_window_claim_is_exclusive_and_survives_uncommitted_sync():
     finally:
         settings.gmail_scope_tier = prev
         autosend.TIMERS_ENABLED = True
+
+
+
+# ---------------------------------------------------------------------------
+# Draft generation is a result, not a string. Only a finished draft can ever
+# send itself; a refusal, a failed call, a blank, or no model at all waits
+# for the person. These pin the hole where a model refusal auto-sent as "yes".
+
+def _drafts_write_themselves(monkeypatch, body="Thanks — Tuesday at 10 works for me.\n\nHarshith"):
+    """Stand in for the model: every reply comes back finished. Tests of the
+    send window use this because the real stub brain now refuses to write."""
+    from superapp.agents import inbox as inbox_agent
+    monkeypatch.setattr(inbox_agent, "_draft_reply",
+                        lambda db, context, provider, msg: inbox_agent.DraftResult(status="ready", body=body))
+
+
+def _model_replies_with(monkeypatch, make):
+    """Patch only the reply-drafting call; everything else stays stubbed.
+    `make(kwargs)` returns an LLMResponse or raises."""
+    from superapp.llm.provider import LLMProvider
+    orig = LLMProvider.complete
+
+    def fake(self, db, *, task, **kw):
+        if task == "reply_draft":
+            return make(kw)
+        return orig(self, db, task=task, **kw)
+    monkeypatch.setattr(LLMProvider, "complete", fake)
+
+
+def _sync_delegated_sender(uid):
+    """Seed a mailbox with an auto-reply rule for priya@eureka.io (a stub-mailbox
+    sender who needs a reply) and sync once. Returns (db, message, draft)."""
+    import superapp.config as config_module
+    from superapp import autosend
+    from superapp.agents.base import run_think
+    from superapp.models import InboxDraft, InboxMessage, utcnow
+    from superapp.routers.inbox import set_auto_reply
+    from superapp.substrate.inbox import upsert_account
+
+    config_module.get_settings().gmail_scope_tier = "send"
+    autosend.TIMERS_ENABLED = False
+    db = SessionLocal()
+    upsert_account(db, user_id=uid, email="stub@example.com")
+    for i in range(15):   # enough known mail that the sync is not treated as a backfill
+        db.add(InboxMessage(user_id=uid, account_email="stub@example.com",
+                            gmail_msg_id=f"{uid}-old-{i}", thread_id=f"{uid}-t-{i}",
+                            from_name="Old", from_addr="old@example.com", subject="old",
+                            body_text="old", tier="cleared", received_at=utcnow()))
+    set_auto_reply(db, uid, sender="priya@eureka.io", on=True)
+    db.commit()
+    run_think(db, agent="inbox", user_id=uid, trigger={"kind": "email_sync"})
+    db.commit()
+    m = db.scalar(select(InboxMessage).where(InboxMessage.user_id == uid,
+                                             InboxMessage.from_addr == "priya@eureka.io"))
+    assert m is not None and m.tier == "needs_reply"
+    d = db.scalar(select(InboxDraft).where(InboxDraft.message_id == m.id))
+    assert d is not None
+    return db, m, d
+
+
+def _never_scheduled(db, uid, d, status, reason_fragment):
+    from superapp.models import Event
+    assert d.generation_status == status, (d.generation_status, d.generation_reason)
+    assert reason_fragment in d.generation_reason
+    assert d.status == "waiting"          # sits in Needs you for the person
+    assert d.auto_send_at is None
+    assert db.scalar(select(Event).where(Event.user_id == uid,
+                                         Event.type == "draft_auto_scheduled")) is None
+
+
+def _restore_tier():
+    import superapp.config as config_module
+    config_module.get_settings().gmail_scope_tier = "read"
+
+
+def test_stub_brain_never_writes_a_sendable_draft():
+    """The regression for the real hole: with no model configured, the old
+    drafter invented 'Yes from my side' and a delegated sender auto-sent it.
+    Now there is no body, the draft is marked failed, and nothing is armed."""
+    try:
+        db, m, d = _sync_delegated_sender("nostub-tester")
+        assert d.body == ""
+        _never_scheduled(db, "nostub-tester", d, "failed", "no model configured")
+    finally:
+        _restore_tier()
+
+
+def test_refused_draft_never_auto_sends(monkeypatch):
+    from superapp.llm.provider import LLMResponse
+    _model_replies_with(monkeypatch, lambda kw: LLMResponse(
+        text="", model="test", input_tokens=1, output_tokens=0, stop_reason="refusal"))
+    try:
+        db, m, d = _sync_delegated_sender("refuse-tester")
+        assert d.body == ""
+        _never_scheduled(db, "refuse-tester", d, "refused", "declined")
+    finally:
+        _restore_tier()
+
+
+def test_failed_draft_call_never_auto_sends(monkeypatch):
+    """A timeout or outage while drafting is a failed draft, never an invented
+    one — and the rest of the sync still completes."""
+    def boom(kw):
+        raise TimeoutError("upstream took too long")
+    _model_replies_with(monkeypatch, boom)
+    try:
+        db, m, d = _sync_delegated_sender("timeout-tester")
+        assert d.body == ""
+        _never_scheduled(db, "timeout-tester", d, "failed", "TimeoutError")
+    finally:
+        _restore_tier()
+
+
+def test_draft_missing_information_never_auto_sends(monkeypatch):
+    """The model keeps leaving a blank even after being asked to rewrite: the
+    words are kept for the person to finish, and nothing sends."""
+    from superapp.llm.provider import LLMResponse
+    _model_replies_with(monkeypatch, lambda kw: LLMResponse(
+        text="Sounds good, [time] works for me.\n\nHarshith", model="test",
+        input_tokens=1, output_tokens=1))
+    try:
+        db, m, d = _sync_delegated_sender("blank-tester")
+        assert "[time]" in d.body
+        _never_scheduled(db, "blank-tester", d, "needs_input", "blank")
+    finally:
+        _restore_tier()
+
+
+def test_finished_draft_still_schedules(monkeypatch):
+    """The gate is specific: a ready draft from a delegated sender arms as before."""
+    from superapp.llm.provider import LLMResponse
+    _model_replies_with(monkeypatch, lambda kw: LLMResponse(
+        text="Thanks Priya — Tuesday at 10 works.\n\nHarshith", model="test",
+        input_tokens=1, output_tokens=1))
+    try:
+        db, m, d = _sync_delegated_sender("ready-tester")
+        assert d.generation_status == "ready" and d.status == "auto_pending"
+    finally:
+        _restore_tier()
+
+
+def test_schedule_refuses_an_unfinished_draft():
+    import pytest
+    from superapp import autosend
+    from superapp.models import InboxMessage, utcnow
+    from superapp.substrate.inbox import create_draft
+    db = SessionLocal()
+    m = InboxMessage(user_id="harshith", account_email="h@x.com", gmail_msg_id="unfin-1",
+                     thread_id="t-unfin", from_name="Priya", from_addr="priya@eureka.io",
+                     subject="Tuesday?", body_text="Does Tuesday work?", tier="needs_reply",
+                     received_at=utcnow())
+    db.add(m); db.flush()
+    d = create_draft(db, user_id="harshith", message_id=m.id, body="",
+                     generation_status="failed", generation_reason="no model configured")
+    with pytest.raises(ValueError):
+        autosend.schedule(db, draft=d, msg=m, gate_tier=1)
+    db.rollback(); db.close()
+
+
+def test_send_due_holds_an_unfinished_draft_even_if_pending():
+    """Belt and braces at the deadline: a legacy row (or one whose status changed
+    after arming) is held for the person, never sent."""
+    import superapp.config as config_module
+    from datetime import timedelta
+    from superapp import autosend
+    from superapp.models import Event, InboxDraft, InboxMessage, utcnow
+    from superapp.substrate.inbox import create_draft
+    settings = config_module.get_settings()
+    settings.gmail_scope_tier = "send"
+    try:
+        db = SessionLocal()
+        m = InboxMessage(user_id="harshith", account_email="h@x.com", gmail_msg_id="legacy-1",
+                         thread_id="t-legacy", from_name="Priya", from_addr="priya@eureka.io",
+                         subject="Tuesday?", body_text="Does Tuesday work?", tier="needs_reply",
+                         received_at=utcnow())
+        db.add(m); db.flush()
+        d = create_draft(db, user_id="harshith", message_id=m.id,
+                         body="Hi Priya — got it, thanks for the nudge. Yes from my side; (stub draft)",
+                         generation_status="failed", generation_reason="legacy stub draft")
+        d.status = "auto_pending"
+        d.auto_send_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+        assert autosend.send_due(db, user_id="harshith", draft_id=d.id) == 0
+        held = db.get(InboxDraft, d.id)
+        assert held.status == "waiting" and held.auto_send_at is None
+        ev = db.scalar(select(Event).where(Event.type == "draft_auto_held",
+                                           Event.payload["draft_id"].as_string() == d.id)) \
+            if db.bind.dialect.name == "postgresql" else \
+            next((e for e in db.scalars(select(Event).where(Event.type == "draft_auto_held"))
+                  if e.payload.get("draft_id") == d.id), None)
+        assert ev is not None and "never finished" in ev.payload["why"]
+        db.close()
+    finally:
+        settings.gmail_scope_tier = "read"
+
+
+def test_production_refuses_a_stub_brain():
+    import pytest
+    from superapp.config import assert_llm_configured, get_settings
+    s = get_settings()
+    prev = (s.allow_stub_llm, s.anthropic_api_key)
+    try:
+        s.allow_stub_llm, s.anthropic_api_key = False, ""
+        with pytest.raises(RuntimeError):
+            assert_llm_configured(s)
+        s.anthropic_api_key = "sk-ant-test"
+        assert_llm_configured(s)          # a key satisfies it
+        s.allow_stub_llm, s.anthropic_api_key = True, ""
+        assert_llm_configured(s)          # dev explicitly allows stub mode
+    finally:
+        s.allow_stub_llm, s.anthropic_api_key = prev

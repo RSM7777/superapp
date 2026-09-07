@@ -11,6 +11,8 @@ from .routers import auth as auth_router, interview as interview_router, finance
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from .config import assert_llm_configured, get_settings
+    assert_llm_configured(get_settings())   # a stub brain never serves real mail
     # Dev convenience; real schema management is Alembic (`alembic upgrade head`).
     Base.metadata.create_all(bind=engine)
     try:  # auto-reply windows that were open when the process last stopped
