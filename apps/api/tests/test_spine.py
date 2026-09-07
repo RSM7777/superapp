@@ -2105,18 +2105,31 @@ def test_live_mailbox_without_credentials_never_fake_sends():
 
 
 def test_existing_gmail_mailboxes_keep_their_vault_key():
-    """The migration must not orphan a single stored credential: an account
-    row that predates providers resolves to exactly the string its token was
-    written under, so nobody has to reconnect."""
+    """A row written without a provider must still resolve to exactly the
+    vault key its token was stored under, so no credential is orphaned and
+    nobody reconnects. The stored default is what is under test here, which
+    is the same value the migration backfills, so flush before asserting: a
+    transient object would pass on the code's fallback alone."""
     from superapp.inbox.factory import provider_of, vault_key
     from superapp.models import GmailAccount
 
-    legacy = GmailAccount(user_id="harshith", email="someone@gmail.com")
-    assert provider_of(legacy) == "gmail"
-    assert vault_key(legacy) == "gmail:someone@gmail.com"
+    db = SessionLocal()
+    try:
+        legacy = GmailAccount(user_id="legacy-tester", email="someone@gmail.com")
+        db.add(legacy)
+        db.flush()
+        assert legacy.provider == "gmail"          # the column default itself
+        assert provider_of(legacy) == "gmail"
+        assert vault_key(legacy) == "gmail:someone@gmail.com"
 
-    outlook = GmailAccount(user_id="harshith", email="someone@outlook.com", provider="outlook")
-    assert vault_key(outlook) == "outlook:someone@outlook.com"
+        outlook = GmailAccount(user_id="legacy-tester", email="someone@outlook.com",
+                               provider="outlook")
+        db.add(outlook)
+        db.flush()
+        assert vault_key(outlook) == "outlook:someone@outlook.com"
+    finally:
+        db.rollback()   # leave no mailboxes behind; others count by position
+        db.close()
 
 
 def test_mailbox_order_is_stable_so_colours_and_primary_do_not_move():
@@ -2158,4 +2171,64 @@ def test_stub_mailbox_is_a_provider_not_a_global_mode():
     sent_id = c.send_reply(to_addr="a@b.example", subject="hi", body="there",
                            thread_id="t", external_id="x", auto=True)
     assert len(SENT) == before + 1 and SENT[-1]["id"] == sent_id and SENT[-1]["auto"] is True
+    db.close()
+
+
+
+def test_offline_mailbox_survives_the_provider_migration():
+    """The offline mailbox predates the provider column. If the migration
+    backfilled it to "gmail" like everything else it would be handed to the
+    real Gmail client, which raises on its placeholder credential, and every
+    sync would fail with no way back. Assert the rule the migration encodes."""
+    import re
+    from pathlib import Path
+
+    sql = Path("alembic/versions/0019_mail_provider.py").read_text()
+    assert re.search(r"UPDATE gmail_accounts SET provider='stub'\s*\"?\s*\n?\s*\"?\s*WHERE email='stub@example.com'", sql), \
+        "0019 must repoint the offline mailbox at the stub provider"
+
+    # ...and the account that results is served by the stub client, not Gmail.
+    from superapp.inbox.factory import client_for
+    from superapp.inbox.stub_client import STUB_ADDRESS, StubMailClient
+    from superapp.substrate.inbox import upsert_account
+
+    db = SessionLocal()
+    acct = upsert_account(db, user_id="stub-migration-tester", email=STUB_ADDRESS,
+                          provider="stub")
+    db.flush()
+    assert isinstance(client_for(db, "stub-migration-tester", acct), StubMailClient)
+    db.rollback()
+    db.close()
+
+
+def test_a_broken_mailbox_keeps_its_alarm_when_another_is_healthy():
+    """One mailbox syncing fine used to clear the reconnect flag raised by a
+    different, broken one. That re-armed the 'already warned' guard, so the
+    reconnect push fired again on the very next sync and burned the day's
+    push budget."""
+    from superapp.agents.inbox import _flag_reauth, _heal_reauth
+    from superapp.models import UserFact
+
+    uid = "reauth-tester"
+    db = SessionLocal()
+
+    def flag_state():
+        f = db.scalar(select(UserFact).where(
+            UserFact.user_id == uid, UserFact.domain == "inbox",
+            UserFact.key == "reauth_needed"))
+        return (f.value or {}) if f else {}
+
+    _flag_reauth(db, uid, "broken@gmail.com")
+    db.commit()
+    assert flag_state().get("needed") is True
+
+    # a different, healthy mailbox must not silence it
+    _heal_reauth(db, uid, "healthy@gmail.com")
+    db.commit()
+    assert flag_state().get("needed") is True
+
+    # the mailbox that was actually broken coming back does silence it
+    _heal_reauth(db, uid, "broken@gmail.com")
+    db.commit()
+    assert flag_state().get("needed") is False
     db.close()

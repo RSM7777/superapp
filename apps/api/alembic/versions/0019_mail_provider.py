@@ -33,6 +33,13 @@ def upgrade() -> None:
         op.add_column("gmail_accounts",
                       sa.Column("provider", sa.String(16), nullable=False,
                                 server_default="gmail"))
+    # The offline mailbox predates `provider` and would be backfilled to
+    # "gmail" like everything else. It holds a placeholder credential, so the
+    # real Gmail client would raise on it and every sync would fail with no
+    # way back. Unguarded, so it also repairs a database where create_all
+    # added the column before this migration ran.
+    op.execute("UPDATE gmail_accounts SET provider='stub' "
+               "WHERE email='stub@example.com'")
     if "subscription_id" not in acct:
         op.add_column("gmail_accounts",
                       sa.Column("subscription_id", sa.String(128), nullable=False,
@@ -40,9 +47,12 @@ def upgrade() -> None:
 
     # Widths. SQLite stores TEXT regardless, so skip the rewrite there.
     if not sqlite:
+        # Widen only. Passing server_default would DROP whatever default the
+        # column has, leaving NOT NULL with nothing to fall back on and
+        # breaking any insert that omits the cursor.
         op.alter_column("gmail_accounts", "history_id",
                         type_=sa.Text(), existing_type=sa.String(32),
-                        existing_nullable=False, server_default=None)
+                        existing_nullable=False)
         op.alter_column("inbox_messages", "gmail_msg_id",
                         type_=sa.String(512), existing_type=sa.String(32),
                         existing_nullable=False)
