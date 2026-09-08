@@ -230,6 +230,9 @@ def inbox_context(db: Session, user_id: str) -> dict:
         "sync_error": a.sync_error,
         "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
         "recovered_count": (a.recovery_state or {}).get("processed", 0),
+        # So the app can name the mailbox honestly instead of assuming Gmail,
+        # and send a reconnect back to the provider it belongs to.
+        "provider": getattr(a, "provider", "") or "gmail",
     } for i, a in enumerate(_accts)]
     return {
         "connected": bool(_accts),

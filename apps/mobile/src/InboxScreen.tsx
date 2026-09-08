@@ -52,6 +52,7 @@ const unfinished = (d: Draft) => !!d.generation && d.generation !== "ready";
 type Ask = {
   id: string; from_name: string; from_addr?: string; box?: string; subject: string; gist: string;
   why_now: string; kind: string; received_at: string; body: string; draft: Draft | null;
+  importance?: "low" | "normal" | "high";
 };
 type Note = {
   id: string; from_name: string; from_addr: string; box?: string; subject: string;
@@ -361,6 +362,14 @@ export function InboxScreen({
                         </View>
                         <Text style={s.subject} numberOfLines={1}>{a.subject}</Text>
                       </View>
+                      {a.importance === "high" ? (
+                        // Triage now says how much something MATTERS separately
+                        // from whether it needs an answer, so the two can differ —
+                        // a watched sender's notice is important and owed nothing.
+                        <View style={s.mattersMark}>
+                          <Text style={s.mattersText}>!</Text>
+                        </View>
+                      ) : null}
                       {a.draft && !sent && (secondsLeft(a.draft) !== null || inFlight(a.draft)) ? (
                         <View style={[s.chip, s.chipAuto]}>
                           <Text style={[s.chipText, { color: C.lav }]}>
@@ -665,6 +674,11 @@ const s = StyleSheet.create({
     paddingHorizontal: 10, paddingVertical: 5,
   },
   chipText: { fontFamily: MONO, fontSize: 10, letterSpacing: 0.8, color: C.rose },
+  mattersMark: {
+    width: 20, height: 20, borderRadius: 10, alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(255,157,168,0.16)", borderWidth: 1, borderColor: "rgba(255,157,168,0.4)",
+  },
+  mattersText: { fontFamily: MONO, fontSize: 12, color: C.rose, marginTop: -1 },
   chipAuto: { borderColor: "rgba(199,184,255,0.45)", backgroundColor: "rgba(199,184,255,0.10)" },
   autoStrip: {
     flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12,

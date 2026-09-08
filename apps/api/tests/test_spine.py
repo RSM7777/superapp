@@ -3015,3 +3015,123 @@ def test_a_draft_built_on_imported_notes_never_auto_sends():
     assert why and "read it before it goes" in why
     d.used_imported_context = False
     assert draft_unsendable(d) is None
+
+
+def test_profile_reports_what_the_record_holds():
+    """The app cannot offer to import your history without being able to say
+    whether it has happened, is running, or has never been asked for."""
+    r = client.get("/v1/profile/knows", headers=AUTH)
+    assert r.status_code == 200
+    h = r.json()["history"]
+    assert set(h) == {"messages_recorded", "last_run", "last_result", "last_detail", "sources"}
+    assert h["messages_recorded"] == 0 and h["last_run"] is None   # nobody has imported yet
+
+    # a note the person hands over is accepted and, where memory can store it,
+    # comes back as a source they can see. Chunk storage is Postgres-only, so
+    # on the test database the call succeeds and stores nothing — assert the
+    # contract, and the visibility only where it is actually possible.
+    import superapp.memory as memory
+    r = client.post("/v1/knowledge/import", headers=AUTH, json={
+        "kind": "note", "title": "Board meeting, 14 March",
+        "text": "We agreed the walkaway number and that Priya runs the demo."})
+    assert r.status_code == 200
+    out = r.json()
+    assert set(out) >= {"ref_id", "chunks", "stored", "truncated"}
+    db = SessionLocal()
+    can_store = memory.available(db)
+    db.close()
+    assert out["stored"] is can_store
+    if can_store:
+        h = client.get("/v1/profile/knows", headers=AUTH).json()["history"]
+        assert any(s["title"] == "Board meeting, 14 March" for s in h["sources"])
+
+
+def test_history_import_needs_a_mailbox_and_says_it_is_read_only():
+    r = client.post("/v1/inbox/import/history", headers=AUTH, json={"months": 24})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["started"] is True and "read-only" in body["note"].lower()
+    # bounds are enforced, so a slip cannot ask for a decade of everything
+    assert client.post("/v1/inbox/import/history", headers=AUTH,
+                       json={"months": 999}).status_code == 422
+    assert client.post("/v1/inbox/import/history", headers=AUTH,
+                       json={"limit": 99999}).status_code == 422
+
+
+def test_outlook_is_a_provider_the_seam_already_understands():
+    """The point of the seam: adding Microsoft is a class and one branch, and
+    everything above it — vault key, factory, account row — works unchanged."""
+    import superapp.config as config_module
+    from superapp.inbox.factory import client_for, configured, offered, vault_key
+    from superapp.inbox.outlook_client import OutlookClient
+    from superapp.models import GmailAccount
+    from superapp.substrate.inbox import upsert_account
+    from superapp.vault import store_token
+    import json as _json
+
+    settings = config_module.get_settings()
+    prev = (settings.microsoft_client_id, settings.microsoft_client_secret)
+    settings.microsoft_client_id = "test-client"
+    settings.microsoft_client_secret = "test-secret"
+    try:
+        assert configured("outlook") is True
+        labels = {p["provider"] for p in offered()}
+        assert "outlook" in labels          # offered only when it can finish a sign-in
+
+        acct = GmailAccount(user_id="u", email="me@outlook.com", provider="outlook")
+        assert vault_key(acct) == "outlook:me@outlook.com"
+
+        db = SessionLocal()
+        a = upsert_account(db, user_id="outlook-tester", email="me@outlook.com",
+                           provider="outlook")
+        store_token(db, user_id="outlook-tester", provider=vault_key(a),
+                    token=_json.dumps({"access_token": "t", "refresh_token": "r",
+                                       "expiry_ts": 9e9}))
+        db.commit()
+        c = client_for(db, "outlook-tester", a)
+        assert isinstance(c, OutlookClient) and c.provider == "outlook"
+
+        # the consent URL is Microsoft's, carries our signed state, and asks
+        # for exactly the scopes the trust ladder is set to
+        settings.gmail_scope_tier = "send"
+        url = c.auth_url("state-123")
+        assert url.startswith("https://login.microsoftonline.com/common/oauth2/v2.0/authorize")
+        for want in ("offline_access", "Mail.Read", "Mail.Send", "state-123"):
+            assert want.replace(".", "%2E") in url or want in url.replace("%20", " "), want
+        assert "Mail.ReadWrite" not in url.replace("%20", " ")   # send tier, not modify
+        db.rollback()
+        db.close()
+    finally:
+        settings.microsoft_client_id, settings.microsoft_client_secret = prev
+        settings.gmail_scope_tier = "read"
+
+
+def test_outlook_reads_graph_into_the_same_shape_gmail_produces():
+    """Nothing above the seam may be able to tell the providers apart."""
+    from superapp.inbox.gmail_client import GmailClient
+    from superapp.inbox.outlook_client import OutlookClient
+
+    graph = {
+        "id": "AAMkAGI2" + "x" * 140, "conversationId": "AAQkAGI2" + "y" * 70,
+        "subject": "Re: the slot", "receivedDateTime": "2026-03-14T09:30:00Z",
+        "from": {"emailAddress": {"name": "Priya Sharma", "address": "priya@eureka.io"}},
+        "body": {"contentType": "html", "content": "<p>Where did we land?</p>"},
+        "internetMessageHeaders": [{"name": "x-nano-auto", "value": "1"}],
+    }
+    out = OutlookClient()._parse(graph)
+    gmail = GmailClient()._parse({
+        "id": "18f0aa", "threadId": "18f0aa", "labelIds": ["INBOX"],
+        "internalDate": "1773480600000", "snippet": "",
+        "payload": {"mimeType": "text/plain", "headers": [
+            {"name": "From", "value": "Priya Sharma <priya@eureka.io>"},
+            {"name": "Subject", "value": "Re: the slot"}], "body": {"data": ""}},
+    })
+    assert set(out) == set(gmail), (set(out) ^ set(gmail))
+    assert out["from_addr"] == "priya@eureka.io" and out["from_name"] == "Priya Sharma"
+    assert out["body_text"] == "Where did we land?"
+    assert out["auto_submitted"] is True          # our own marker, read back
+    assert len(out["gmail_msg_id"]) > 128         # the width the migration bought
+
+    # a delta deletion and an unsent fragment are not mail
+    assert OutlookClient()._parse({"id": "x", "@removed": {"reason": "deleted"}}) is None
+    assert OutlookClient()._parse({"id": "x", "isDraft": True}) is None

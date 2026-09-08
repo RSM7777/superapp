@@ -6,7 +6,9 @@ import Constants from "expo-constants";
 import * as Application from "expo-application";
 import * as WebBrowser from "expo-web-browser";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
+} from "react-native";
 
 const C = {
   bg: "#04040A", panel: "rgba(25,18,51,0.5)", border: "rgba(199,184,255,0.14)",
@@ -18,11 +20,24 @@ const SERIF = "InstrumentSerif_400Regular";
 const SANS = "InstrumentSans_400Regular";
 const SANS_SEMI = "InstrumentSans_600SemiBold";
 
-type Mailbox = { email: string; primary: boolean; color: string; count: number };
+type Mailbox = {
+  email: string; primary: boolean; color: string; count: number; provider?: string;
+};
+type Provider = { provider: string; label: string; hint: string };
 type PersonRow = { name: string; email: string; relationship: string; summary: string };
 type FactRow = { domain: string; key: string; belief: string };
 type Facet = { name: string; n: number };
-type Knows = { facets: Facet[]; people: PersonRow[]; facts: FactRow[] };
+type SourceRow = { title: string; kind: string; chunks: number; when: string };
+type History = {
+  messages_recorded: number;
+  last_run: string | null;
+  last_result: string;
+  last_detail: Record<string, any>;
+  sources: SourceRow[];
+};
+type Knows = {
+  facets: Facet[]; people: PersonRow[]; facts: FactRow[]; history?: History;
+};
 
 function initials(s: string): string {
   const t = (s || "?").trim();
@@ -47,13 +62,22 @@ export function ProfileScreen({
   const [knows, setKnows] = useState<Knows | null>(null);
   const [facet, setFacet] = useState("People");
   const [linking, setLinking] = useState(false);
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [choosing, setChoosing] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [teachOpen, setTeachOpen] = useState(false);
+  const [teachTitle, setTeachTitle] = useState("");
+  const [teachText, setTeachText] = useState("");
+  const [teaching, setTeaching] = useState(false);
+  const [teachNote, setTeachNote] = useState("");
   const alive = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
-      const [iRes, kRes] = await Promise.all([
+      const [iRes, kRes, pRes] = await Promise.all([
         fetch(`${apiUrl}/v1/inbox/state`, { headers: auth }),
         fetch(`${apiUrl}/v1/profile/knows`, { headers: auth }),
+        fetch(`${apiUrl}/v1/mail/providers`, { headers: auth }),
       ]);
       if (!alive.current) return;
       if (iRes.ok) {
@@ -66,6 +90,7 @@ export function ProfileScreen({
         setPrioSenders(d.priority_senders ?? []);
       }
       if (kRes.ok) setKnows(await kRes.json());
+      if (pRes.ok) setProviders((await pRes.json()).providers ?? []);
     } catch { /* quiet */ }
   }, [apiUrl, auth]);
 
@@ -75,11 +100,14 @@ export function ProfileScreen({
     return () => { alive.current = false; };
   }, [refresh]);
 
-  const linkMailbox = useCallback(async () => {
+  const linkMailbox = useCallback(async (provider = "gmail") => {
     if (linking) return;
+    setChoosing(false);
     setLinking(true);
     try {
-      const res = await fetch(`${apiUrl}/v1/gmail/auth-url`, { headers: auth });
+      // Each provider owns its consent URL; the callback deep link is shared,
+      // so the app comes back the same way whichever one the person picked.
+      const res = await fetch(`${apiUrl}/v1/${provider}/auth-url`, { headers: auth });
       if (res.ok) {
         const { auth_url } = await res.json();
         await WebBrowser.openAuthSessionAsync(auth_url, "superapp://gmail-connected");
@@ -106,6 +134,51 @@ export function ProfileScreen({
     } catch { /* quiet */ }
   }, [apiUrl, auth, refresh, onChanged]);
 
+  // Read past conversation into the record. Read-only by construction: the
+  // reply path never looks at it, so nothing here is triaged or answered.
+  const importHistory = useCallback(async (months: number) => {
+    if (importing) return;
+    setImporting(true);
+    try {
+      await fetch(`${apiUrl}/v1/inbox/import/history`, {
+        method: "POST", headers: { ...auth, "Content-Type": "application/json" },
+        body: JSON.stringify({ months, limit: 5000 }),
+      });
+      // It runs in the background; the count catches up as it goes.
+      setTimeout(refresh, 4000);
+      setTimeout(refresh, 20000);
+    } catch { /* the next refresh reconciles */ } finally {
+      setTimeout(() => alive.current && setImporting(false), 4000);
+    }
+  }, [apiUrl, auth, importing, refresh]);
+
+  const teach = useCallback(async () => {
+    const title = teachTitle.trim();
+    const text = teachText.trim();
+    if (!title || !text || teaching) return;
+    setTeaching(true);
+    setTeachNote("");
+    try {
+      const res = await fetch(`${apiUrl}/v1/knowledge/import`, {
+        method: "POST", headers: { ...auth, "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "note", title, text }),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        setTeachNote(`Filed in ${d.chunks} piece${d.chunks === 1 ? "" : "s"}.`);
+        setTeachTitle(""); setTeachText("");
+        await refresh();
+        setTimeout(() => alive.current && setTeachOpen(false), 900);
+      } else {
+        setTeachNote("That didn't save. Try again?");
+      }
+    } catch {
+      setTeachNote("Couldn't reach Nano just now.");
+    } finally {
+      if (alive.current) setTeaching(false);
+    }
+  }, [apiUrl, auth, refresh, teachTitle, teachText, teaching]);
+
   const stopAuto = useCallback(async (body: { kind?: string; sender?: string }) => {
     setAutoKinds((k) => k.filter((x) => x !== body.kind));
     setAutoSenders((k) => k.filter((x) => x !== body.sender));
@@ -120,6 +193,9 @@ export function ProfileScreen({
 
   const autoOn = autoKinds.length + autoSenders.length;
   const prioOn = prioKinds.length + prioSenders.length;
+  const hist: History = knows?.history ?? {
+    messages_recorded: 0, last_run: null, last_result: "", last_detail: {}, sources: [],
+  };
   const rows: { name: string; sub: string }[] =
     facet === "People"
       ? (knows?.people ?? []).map((p) => ({
@@ -161,11 +237,12 @@ export function ProfileScreen({
                 {m.primary ? <Text style={s.primaryBadge}>PRIMARY</Text> : null}
               </View>
               <Text style={s.mailMeta}>
-                Gmail · {m.count} synced{reauth && m.primary ? " · reconnect needed" : ""}
+                {m.provider === "outlook" ? "Outlook" : m.provider === "stub" ? "Offline" : "Gmail"}
+                {" · "}{m.count} synced{reauth && m.primary ? " · reconnect needed" : ""}
               </Text>
             </View>
             {reauth && m.primary ? (
-              <Pressable onPress={linkMailbox} hitSlop={8}>
+              <Pressable onPress={() => linkMailbox(m.provider || "gmail")} hitSlop={8}>
                 <Text style={[s.chip, { color: C.rose }]}>RECONNECT</Text>
               </Pressable>
             ) : (
@@ -173,7 +250,10 @@ export function ProfileScreen({
             )}
           </View>
         ))}
-        <Pressable style={[s.linkRow, mailboxes.length > 0 && s.divider]} onPress={linkMailbox}>
+        <Pressable style={[s.linkRow, mailboxes.length > 0 && s.divider]} disabled={linking}
+                   onPress={() => (providers.length > 1
+                     ? setChoosing(true)
+                     : linkMailbox(providers[0]?.provider ?? "gmail"))}>
           <View style={s.plus}><Text style={{ color: C.lav, fontSize: 18, marginTop: -2 }}>+</Text></View>
           <Text style={s.linkText}>{linking ? "Opening sign-in…" : "Link another mailbox"}</Text>
         </Pressable>
@@ -257,6 +337,76 @@ export function ProfileScreen({
         </View>
       ) : null}
 
+      {/* Everything before now */}
+      <View style={s.sectionRow}>
+        <Text style={s.sectionTitle}>Everything before now</Text>
+        <Text style={[s.count, { color: hist.messages_recorded ? C.mint : C.muted }]}>
+          {hist.messages_recorded ? hist.messages_recorded.toLocaleString() : "none"}
+        </Text>
+      </View>
+      <Text style={s.sectionSub}>
+        {hist.messages_recorded
+          ? "Nano has read your past conversations, so it knows the relationship instead of meeting everyone for the first time."
+          : "Right now Nano only knows mail that arrived after you connected. Let it read what came before and it stops meeting everyone for the first time."}
+      </Text>
+      <View style={s.panel}>
+        <Text style={s.footnote}>
+          This is read only. Old mail is recorded, never triaged, never replied to and never
+          archived. Nothing in it can be answered, because the reply path does not look here.
+        </Text>
+        {importing ? (
+          <View style={[s.linkRow, s.divider]}>
+            <ActivityIndicator color={C.lav} />
+            <Text style={s.linkText}>Reading your history. This takes a few minutes.</Text>
+          </View>
+        ) : (
+          <View style={[s.rangeRow, s.divider]}>
+            {[12, 24, 60].map((m) => (
+              <Pressable key={m} style={s.range} onPress={() => importHistory(m)}>
+                <Text style={s.rangeText}>
+                  {m === 60 ? "Everything" : `Last ${m / 12} year${m === 12 ? "" : "s"}`}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+        {hist.last_run ? (
+          <Text style={[s.footnote, s.divider]}>
+            {hist.last_result === "history_import_failed"
+              ? `Last attempt couldn't finish${hist.last_detail?.account ? ` for ${hist.last_detail.account}` : ""}. Try again.`
+              : hist.last_result === "history_import_skipped"
+              ? "An import is already running."
+              : `Last read ${new Date(hist.last_run).toLocaleDateString()}.`}
+          </Text>
+        ) : null}
+      </View>
+
+      {/* Things that never arrived as email */}
+      <View style={s.sectionRow}>
+        <Text style={s.sectionTitle}>Tell Nano something</Text>
+        <Text style={s.count}>{hist.sources.length || ""}</Text>
+      </View>
+      <Text style={s.sectionSub}>
+        Notes, a meeting transcript, anything it would never see in your mail. Nano reads it as
+        reference when it writes for you.
+      </Text>
+      <View style={s.panel}>
+        <Pressable style={s.linkRow} onPress={() => { setTeachNote(""); setTeachOpen(true); }}>
+          <View style={s.plus}><Text style={{ color: C.lav, fontSize: 18 }}>+</Text></View>
+          <Text style={s.linkText}>Add a note</Text>
+        </Pressable>
+        {hist.sources.map((src, i) => (
+          <View key={src.title + i} style={[s.autoRow, s.divider]}>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={s.autoName} numberOfLines={1}>{src.title || "Untitled"}</Text>
+              <Text style={s.autoMeta}>
+                {src.chunks} piece{src.chunks === 1 ? "" : "s"} · {new Date(src.when).toLocaleDateString()}
+              </Text>
+            </View>
+          </View>
+        ))}
+      </View>
+
       {/* What Nano knows */}
       <View style={s.sectionRow}>
         <Text style={s.sectionTitle}>What Nano knows</Text>
@@ -289,6 +439,74 @@ export function ProfileScreen({
           </Text>
         )}
       </View>
+
+      <Modal visible={choosing} transparent animationType="slide"
+             onRequestClose={() => setChoosing(false)}>
+        <View style={s.sheetWrap}>
+          <View style={s.sheet}>
+            <Text style={s.sheetTitle}>Which mailbox?</Text>
+            <Text style={s.sheetSub}>
+              You sign in with the provider. Nano never sees the password, and only reads the
+              mailbox you grant it.
+            </Text>
+            {providers.map((pv) => (
+              <Pressable key={pv.provider} style={s.providerRow}
+                         onPress={() => linkMailbox(pv.provider)}>
+                <View style={[s.providerMark,
+                              pv.provider === "outlook" && { backgroundColor: "rgba(0,120,212,0.18)",
+                                                             borderColor: "rgba(0,120,212,0.5)" }]}>
+                  <Text style={[s.providerMarkText,
+                                pv.provider === "outlook" && { color: "#5BA8F5" }]}>
+                    {pv.label.slice(0, 1)}
+                  </Text>
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={s.providerName}>{pv.label}</Text>
+                  <Text style={s.providerHint}>{pv.hint}</Text>
+                </View>
+                <Text style={s.providerGo}>{"›"}</Text>
+              </Pressable>
+            ))}
+            <Pressable style={s.ghost} onPress={() => setChoosing(false)}>
+              <Text style={s.ghostText}>Not now</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={teachOpen} transparent animationType="slide"
+             onRequestClose={() => setTeachOpen(false)}>
+        <View style={s.sheetWrap}>
+          <View style={s.sheet}>
+            <Text style={s.sheetTitle}>Tell Nano something</Text>
+            <Text style={s.sheetSub}>
+              It becomes reference Nano can draw on when it writes for you, with your name on it.
+              Treated as material to read, never as instructions.
+            </Text>
+            <TextInput
+              style={s.field} placeholder="What is it? e.g. Board meeting, 14 March"
+              placeholderTextColor="rgba(138,135,163,0.7)"
+              value={teachTitle} onChangeText={setTeachTitle} maxLength={200}
+            />
+            <TextInput
+              style={[s.field, s.fieldTall]} placeholder="Paste the notes, the transcript, the detail…"
+              placeholderTextColor="rgba(138,135,163,0.7)" multiline
+              value={teachText} onChangeText={setTeachText}
+            />
+            {teachNote ? <Text style={s.sheetNote}>{teachNote}</Text> : null}
+            <View style={s.sheetRow}>
+              <Pressable style={s.ghost} onPress={() => setTeachOpen(false)}>
+                <Text style={s.ghostText}>Not now</Text>
+              </Pressable>
+              <Pressable style={[s.primary, (!teachTitle.trim() || !teachText.trim()) && s.primaryOff]}
+                         disabled={!teachTitle.trim() || !teachText.trim() || teaching}
+                         onPress={teach}>
+                <Text style={s.primaryText}>{teaching ? "Filing…" : "Give it to Nano"}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Pressable style={s.signOut} onPress={onSignOut}>
         <Text style={s.signOutText}>Sign out</Text>
@@ -357,5 +575,50 @@ const s = StyleSheet.create({
     borderColor: "rgba(255,157,168,0.4)", paddingVertical: 13, alignItems: "center",
   },
   signOutText: { fontFamily: SANS_SEMI, fontSize: 14, color: C.rose },
+  rangeRow: { flexDirection: "row", gap: 8, padding: 12 },
+  range: {
+    flex: 1, paddingVertical: 10, borderRadius: 12, alignItems: "center",
+    backgroundColor: "rgba(199,184,255,0.10)", borderWidth: 1, borderColor: "rgba(199,184,255,0.24)",
+  },
+  rangeText: { fontFamily: SANS_SEMI, fontSize: 12.5, color: C.lav },
+  providerRow: {
+    flexDirection: "row", alignItems: "center", gap: 14, padding: 14, borderRadius: 16,
+    backgroundColor: "rgba(25,18,51,0.6)", borderWidth: 1, borderColor: "rgba(199,184,255,0.16)",
+  },
+  providerMark: {
+    width: 40, height: 40, borderRadius: 14, alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(199,184,255,0.14)", borderWidth: 1, borderColor: "rgba(199,184,255,0.32)",
+  },
+  providerMarkText: { fontFamily: SERIF, fontSize: 20, color: C.lav },
+  providerName: { fontFamily: SANS_SEMI, fontSize: 15, color: C.text },
+  providerHint: { fontFamily: SANS, fontSize: 12, color: C.muted, marginTop: 2 },
+  providerGo: { fontFamily: SANS, fontSize: 20, color: C.muted },
+  sheetWrap: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(2,2,6,0.72)" },
+  sheet: {
+    backgroundColor: "#0B0A16", borderTopLeftRadius: 26, borderTopRightRadius: 26,
+    padding: 22, paddingBottom: 38, gap: 12,
+    borderWidth: 1, borderColor: "rgba(199,184,255,0.16)",
+  },
+  sheetTitle: { fontFamily: SERIF, fontSize: 26, color: C.text },
+  sheetSub: { fontFamily: SANS, fontSize: 12.5, lineHeight: 18, color: C.muted },
+  field: {
+    backgroundColor: "rgba(25,18,51,0.6)", borderRadius: 14, padding: 14,
+    borderWidth: 1, borderColor: "rgba(199,184,255,0.16)",
+    fontFamily: SANS, fontSize: 14.5, color: C.text,
+  },
+  fieldTall: { minHeight: 150, textAlignVertical: "top" },
+  sheetNote: { fontFamily: SANS, fontSize: 12.5, color: C.mint },
+  sheetRow: { flexDirection: "row", gap: 10, marginTop: 4 },
+  ghost: {
+    flex: 1, paddingVertical: 14, borderRadius: 16, alignItems: "center",
+    borderWidth: 1, borderColor: "rgba(199,184,255,0.2)",
+  },
+  ghostText: { fontFamily: SANS_SEMI, fontSize: 14, color: C.body },
+  primary: {
+    flex: 2, paddingVertical: 14, borderRadius: 16, alignItems: "center",
+    backgroundColor: C.lav,
+  },
+  primaryOff: { opacity: 0.4 },
+  primaryText: { fontFamily: SANS_SEMI, fontSize: 14, color: "#1A1230" },
   version: { fontFamily: MONO, fontSize: 10, letterSpacing: 1, color: "rgba(138,135,163,0.5)", textAlign: "center", marginTop: 20 },
 });

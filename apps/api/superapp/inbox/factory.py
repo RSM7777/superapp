@@ -34,6 +34,20 @@ def vault_key(acct: GmailAccount) -> str:
     return f"{provider_of(acct)}:{acct.email}"
 
 
+def offered(db: Session | None = None) -> list[dict]:
+    """Which providers a person may link right now. The app asks this rather
+    than hard-coding a list, so a provider the server has no credentials for
+    is never offered as a button that cannot finish a sign-in."""
+    out = []
+    if configured("gmail"):
+        out.append({"provider": "gmail", "label": "Google",
+                    "hint": "Gmail, or Google Workspace"})
+    if configured("outlook"):
+        out.append({"provider": "outlook", "label": "Microsoft",
+                    "hint": "Outlook.com, Hotmail, or a work account"})
+    return out
+
+
 def configured(provider: str = DEFAULT_PROVIDER) -> bool:
     """Is this provider set up on the server at all? Used to decide whether a
     provider may be offered for linking, never to decide whether a specific
@@ -55,6 +69,9 @@ def link_client(provider: str = DEFAULT_PROVIDER) -> MailClient:
         return StubMailClient()
     if provider == "gmail":
         return GmailClient()
+    if provider == "outlook":
+        from .outlook_client import OutlookClient
+        return OutlookClient()
     raise MailNotConnected(f"No mail provider named {provider!r} is configured.")
 
 
@@ -82,6 +99,9 @@ def client_for(db: Session, user_id: str, acct: GmailAccount) -> MailClient:
 
     if provider == "gmail":
         return GmailClient(token, on_token_refresh=_write_back)
+    if provider == "outlook":
+        from .outlook_client import OutlookClient
+        return OutlookClient(token, on_token_refresh=_write_back)
     raise MailNotConnected(f"{acct.email} uses an unsupported provider ({provider}).")
 
 

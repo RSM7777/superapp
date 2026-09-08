@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     # Trust ladder: read (triage only) -> send (drafts sendable) -> modify
     # (auto-archive the cleared tier for real). Climb it deliberately.
     gmail_scope_tier: str = "read"
+
+    # Outlook / Microsoft Graph. Empty means the provider is simply not
+    # offered — nothing else in the app changes.
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = ""
+    microsoft_tenant: str = "common"   # both work/school and personal accounts
+    microsoft_redirect_uri: str = "http://localhost:8000/v1/outlook/callback"
     # The auto-reply grace window: seconds a matched draft waits in Needs you
     # (editable, cancellable) before it sends itself. 0 = send on the spot.
     auto_reply_delay_seconds: int = 60
