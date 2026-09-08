@@ -280,10 +280,17 @@ def _evidence(db: Session, msg, *, deep: bool) -> dict:
     from .. import memory
     from ..people import get_person
     from ..substrate.history import sender_history, thread_history
+    from ..models import GmailAccount, SavedContext
 
     ev: dict = {"memory": "on" if memory.available(db) else
                 "unavailable in this environment (needs Postgres)"}
     ev["retrieval_incomplete"] = not memory.available(db)
+    history_states = db.scalars(select(GmailAccount.history_import_state).where(
+        GmailAccount.user_id == msg.user_id, GmailAccount.provider.in_(("gmail", "outlook"))))
+    ev["history_incomplete"] = any((state or {}).get("status") != "completed" for state in history_states)
+    unindexed_note = db.scalar(select(SavedContext.id).where(
+        SavedContext.user_id == msg.user_id, SavedContext.indexed.is_(False)).limit(1))
+    ev["retrieval_incomplete"] |= ev["history_incomplete"] or unindexed_note is not None
 
     person = get_person(db, msg.user_id, msg.from_addr)
     if person is not None:
@@ -346,7 +353,7 @@ def _evidence(db: Session, msg, *, deep: bool) -> dict:
             "title": r["title"], "project": r["project"],
             "text": r["content"][:900], "link": r["source_ref"],
         } for r in kept]
-        ev["retrieval_incomplete"] = bool(db.info.get("memory_retrieval_degraded"))
+        ev["retrieval_incomplete"] |= bool(db.info.get("memory_retrieval_degraded"))
         if any(r["degraded"] for r in found):
             ev["retrieval_note"] = "some results are lexical only; embeddings are catching up"
     return ev

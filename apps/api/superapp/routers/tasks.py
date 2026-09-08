@@ -293,6 +293,10 @@ def dispatch(db: Session = Depends(get_db)):
     db.commit()
     from ..inbox.recovery import resume_recoveries
     out["mail_recoveries_resumed"] = resume_recoveries()
+    from ..inbox.history_ingest import run_history_imports
+    from ..context_notes import index_saved_context
+    out["history_pages_imported"] = run_history_imports()
+    out["context_notes_indexed"] = index_saved_context()
     return out
 
 

@@ -1,7 +1,7 @@
-# Inbox decisions and Gmail recovery
+# Conversational context, automatic history, and inbox reliability
 
-This change includes PR #4 at `52484b1` and current main at `2fbc4f7`,
-where PRs #2 and #3 have now merged. It preserves the grocery updates and
+This change includes PR #4 at `52484b1` and main at `849e56f`,
+including the Outlook provider. It preserves the grocery updates and
 upstream protections for drafts using imported private context. The added
 inbox changes address three concrete failures: related notes were unavailable
 at triage/archive time, a verifier refusal authorized clearing, and an expired
@@ -9,6 +9,22 @@ Gmail history cursor skipped directly to the present.
 
 ## Resulting behavior
 
+- Profile no longer shows Never miss, Everything before now, or Tell Nano
+  something. Users set priorities and share context in conversation.
+- The conversational `remember_context` action saves the user's actual words
+  in `saved_context`, scoped to that user and idempotent for repeated saves.
+  The next conversation receives recent notes; older notes enter hybrid search.
+  A failed index write leaves the canonical note intact for dispatcher retry.
+  Searchable chat context is private reference, so drafts using it retain the
+  existing explicit-review hold. Priority and mute rules continue to use their
+  existing durable actions through chat.
+- Gmail and Outlook connections initialize a fixed window of three calendar
+  years. OAuth starts background processing; the dispatcher also discovers
+  previously connected mailboxes. Each page and its checkpoint commit together,
+  with no total-message cutoff. An expired page token restarts the same window
+  and deduplicates records. Completed imports are not restarted on reconnect.
+  Mail history supplies context and never enters the triage/draft/send queue.
+  Incomplete history and unindexed notes keep automatic inbox actions held.
 - Triage, archive verification, and drafting retrieve scoped, dated source
   excerpts. Source content remains untrusted reference material.
 - Reply context matches complete correspondent addresses and thread IDs.
@@ -48,6 +64,7 @@ still unmerged and reused those numbers, so its grocery migrations follow main:
 | 0025 | Grocery quantities and product sizes from PR #4 |
 | 0026 | Grocery handoff URL from PR #4 |
 | 0027 | Recovery checkpoint, sync error, last successful sync, conservative legacy vector re-indexing |
+| 0028 | Automatic history checkpoints, durable chat context, wider historical IDs for Outlook |
 
 Run `alembic upgrade head` before starting this API version. This sequence
 supports current main through `0023`. Databases that applied the **unmerged
@@ -55,7 +72,7 @@ PR #4** or an earlier PR #5 commit under conflicting revision numbers need
 schema/version reconciliation before deploying this combined branch; do not
 stamp a new revision blindly. This PR does not deploy or migrate any user database.
 
-The final migration marks existing successful vectors pending once, because
+Migration `0027` marks existing successful vectors pending once, because
 main's older migration labelled historical vectors successful without knowing
 whether they were hash stubs. Source text stays searchable lexically while the
 index catches up; automatic actions remain held during incomplete indexing.
@@ -66,6 +83,9 @@ index catches up; automatic actions remain held during incomplete indexing.
 check evidence reaching all three decisions, verifier failure modes, missing
 context, expired cursors, a forbidden fetch, restart/rollback of a partially
 classified page, conservative recovery actions, and embedding batch integrity.
+Conversation/history regressions additionally check exact-word persistence,
+cross-user isolation, indexing failure/retry, OAuth initialization, fixed dates,
+page rollback, restart deduplication, and the absence of historical queue writes.
 
 The `Inbox release checks` workflow runs the suite, TypeScript checking, and
 `scripts/check_release_postgres.py` against a disposable PostgreSQL 16/pgvector
@@ -73,6 +93,8 @@ service. The PostgreSQL check upgrades main, adds the grocery schema, then
 preserves existing mail, a grocery row, and source text through the recovery
 migration. It checks source retention and scoped lexical/dense SQL, verifies JSON NULL
 recovery state, and confirms a failed retrieval does not poison the transaction.
+It also checks automatic-history JSON, private chat indexing with savepoint
+recovery, and Outlook's longer historical message IDs.
 Its model vectors are test doubles, not evidence of model quality.
 
 The migration tests also start from a populated main database at `0023` and
@@ -87,8 +109,17 @@ throughput depends on dispatcher cadence (up to 25 listed messages per account
 per tick). Keep that worker scheduled; large inboxes remain visibly incomplete
 until scanning and catch-up finish.
 
-This PR does not implement Outlook, verified discovery of new email recipients,
-automatic Teams/document connectors, durable historical context import, or
-reconciliation of an uncertain send after a provider timeout. It is not a claim
+The separate historical-context worker processes up to 50 messages per page,
+one page per account per dispatch invocation (at most five accounts, oldest
+progress first), plus four initial rounds after OAuth. Completion time depends
+on mailbox size, provider latency and dispatcher cadence; it is not immediate
+onboarding. The existing dispatch schedule is ten minutes. Monitor pending and
+retrying `history_import_state` records and keep the dispatcher scheduled.
+Historical imports update correspondent counters without one LLM call per old
+email. Source text remains available for retrieval and current-message reasoning.
+
+This PR does not implement verified discovery of new email recipients,
+automatic Teams/document connectors, or reconciliation of an uncertain send
+after a provider timeout. It is not a claim
 that users can safely turn off all their mail notifications. Scoped real-user
 validation and production configuration checks are still required.

@@ -22,6 +22,17 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class SavedContext(Base):
+    """The user's own words, retained even while the search index is unavailable."""
+    __tablename__ = "saved_context"
+    __table_args__ = (Index("ix_saved_context_user", "user_id", "created_at"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    indexed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class FlightWatch(Base):
     """The Flycatcher: a standing flight-price watch. The scout re-checks it
     daily; the person hears about it only on a new low or a hit target."""
@@ -344,6 +355,7 @@ class GmailAccount(Base):
     history_id: Mapped[str] = mapped_column(Text, default="")
     # Committed with the recovered page. NULL means no recovery is in progress.
     recovery_state: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    history_import_state: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     sync_error: Mapped[str] = mapped_column(String(200), default="")
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     watch_expiry: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -435,8 +447,8 @@ class MailHistory(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     account_email: Mapped[str] = mapped_column(String(128), default="")
-    gmail_msg_id: Mapped[str] = mapped_column(String(32), nullable=False)
-    thread_id: Mapped[str] = mapped_column(String(32), default="")
+    gmail_msg_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(256), default="")
     # 'outbound' is the half the product never had. Without the user's own
     # replies, "unanswered" is a guess and "I always reply to Priya" is unknowable.
     direction: Mapped[str] = mapped_column(String(8), default="inbound")

@@ -49,7 +49,10 @@ migrate("head")
 
 from superapp import memory
 from superapp.agents.inbox import _evidence
-from superapp.models import GmailAccount, InboxMessage
+from superapp.models import GmailAccount, InboxMessage, SavedContext
+from superapp.context_notes import save_context
+from superapp.inbox.history_ingest import ensure_history_import
+from superapp.substrate.history import record_message
 from superapp.substrate.inbox import upsert_account
 
 with Session(engine) as db:
@@ -57,7 +60,12 @@ with Session(engine) as db:
     assert {"grocery_items", "grocery_orders", "grocery_links", "grocery_purchases"} <= set(inspect(engine).get_table_names())
     assert next(c for c in inspect(engine).get_columns("grocery_orders") if c["name"] == "external_id")["type"].length == 1024
     assert db.scalar(text("SELECT name FROM grocery_items WHERE id='upgrade-item'")) == "Milk"
-    assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0027"
+    assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0028"
+    assert "saved_context" in inspect(engine).get_table_names()
+    assert db.scalar(text("SELECT history_import_state IS NULL FROM gmail_accounts WHERE id='main-account'"))
+    old_mail = record_message(db, user_id="outlook-user", account_email="me@example.com", msg={
+        "gmail_msg_id": "A" * 180, "thread_id": "B" * 100, "from_addr": "alex@example.com"})
+    assert old_mail.gmail_msg_id == "A" * 180 and old_mail.thread_id == "B" * 100
     assert db.scalar(text("SELECT embed_status FROM memory_chunks WHERE user_id='legacy-user'")) == "pending"
     assert {"generation_status", "generation_reason"} <= {
         c["name"] for c in inspect(engine).get_columns("inbox_drafts")}
@@ -95,6 +103,25 @@ with Session(engine) as db:
     db.flush()
     assert db.scalar(select(GmailAccount.id).where(GmailAccount.recovery_state.isnot(None))) is None
 
+    # Background history is selectable on upgraded accounts; its JSON token
+    # and window persist together. Chat keeps canonical words even if indexing
+    # is unavailable, and its searchable copy carries the private-source hold.
+    ensure_history_import(acct)
+    acct.history_import_state = {**acct.history_import_state, "page_token": "second", "status": "reading"}
+    db.flush()
+    assert db.scalar(select(GmailAccount.id).where(
+        GmailAccount.user_id == "check-user",
+        GmailAccount.history_import_state["status"].as_string() != "completed")) == acct.id
+    def broken_index(db, **kw): db.execute(text("SELECT missing_column FROM memory_chunks"))
+    with patch.object(memory, "remember", broken_index):
+        note = save_context(db, user_id="chat-user", text="Remember Cedarvale's internal pricing.")
+        assert not note.indexed
+    assert db.scalar(select(SavedContext.text).where(SavedContext.id == note.id)) == note.text
+    note = save_context(db, user_id="chat-user", text=note.text)
+    assert note.indexed
+    hit = memory.recall_for_agent(db, user_id="chat-user", agent="inbox", query="Cedarvale")[0]
+    assert hit["source"] == "import" and hit["domain"] == "knowledge"
+
     # A retrieval SQL failure is contained by a savepoint; the message remains
     # writable and no caller can interpret the failure as permission to clear.
     msg = InboxMessage(user_id="check-user", account_email="me@example.com", gmail_msg_id="savepoint",
@@ -106,4 +133,4 @@ with Session(engine) as db:
         assert _evidence(db, msg, deep=True)["retrieval_incomplete"]
     assert db.scalar(text("SELECT 1")) == 1
     db.rollback()
-print("PostgreSQL migration, chunk retention, scoped retrieval, and recovery state checks passed.")
+print("PostgreSQL migration, retrieval, recovery, background history, and chat context checks passed.")

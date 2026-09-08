@@ -82,7 +82,11 @@ class MailClient(Protocol):
         """Recent mail for a first fill, ignoring the cursor."""
         ...
 
-    def history(self, *, months: int = 24, limit: int = 1500) -> list[dict]:
+    def history_page(self, *, since: datetime, until: datetime, page_token: str = "") -> tuple[list[dict], str]:
+        """Historical context page; a separate path from actionable inbox sync."""
+        ...
+
+    def history(self, *, months: int = 36, limit: int = 1500) -> list[dict]:
         """Past conversation for context: sent AND received, inbox and archive.
 
         Deliberately not a bigger `backfill`. What backfill returns enters the

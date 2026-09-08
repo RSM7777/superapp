@@ -210,7 +210,26 @@ class GmailClient:
                 msgs.append(parsed)
         return msgs
 
-    def history(self, *, months: int = 24, limit: int = 1500,
+    def history_page(self, *, since: datetime, until: datetime, page_token: str = "") -> tuple[list[dict], str]:
+        """One bounded page of the fixed historical window, never the live queue."""
+        params = {"q": f"after:{int(since.timestamp())} before:{int(until.timestamp())} -in:chats -in:drafts -in:spam -in:trash",
+                  "maxResults": 50}
+        if page_token:
+            params["pageToken"] = page_token
+        data = self._get("/messages", **params)
+        messages = []
+        for ref in data.get("messages", []):
+            try:
+                parsed = self._parse(self._get(f"/messages/{ref['id']}", format="full"), queue=False)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (404, 410):
+                    continue
+                raise
+            if parsed:
+                messages.append(parsed)
+        return messages, data.get("nextPageToken", "")
+
+    def history(self, *, months: int = 36, limit: int = 1500,
                 page_size: int = 100) -> list[dict]:
         """Past conversation for context: sent AND received, inbox and archive,
         going back `months`. Read-only and inert.
