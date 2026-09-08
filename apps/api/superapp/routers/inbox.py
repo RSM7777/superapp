@@ -934,9 +934,38 @@ def profile_knows(user_id: str = Depends(current_user_id), db: Session = Depends
                               "belief": str(text)[:200],
                               "learned_at": f.learned_at.isoformat()})
     fact_rows = fact_rows[:40]
+
+    # What the record holds, so the app can say whether importing past mail has
+    # been done, is running, or has never been asked for. Without this the
+    # import button has nothing to report and the person cannot tell whether
+    # anything happened.
+    from sqlalchemy import func as _func
+
+    from ..models import Event, MailHistory
+    recorded = db.scalar(_select(_func.count()).select_from(MailHistory)
+                         .where(MailHistory.user_id == user_id)) or 0
+    last_import = db.scalar(_select(Event).where(
+        Event.user_id == user_id,
+        Event.type.in_(("history_imported", "history_import_failed",
+                        "history_import_skipped")))
+        .order_by(Event.created_at.desc()).limit(1))
+    imported = list(db.scalars(_select(Event).where(
+        Event.user_id == user_id, Event.type == "source_imported")
+        .order_by(Event.created_at.desc()).limit(8)))
+    history = {
+        "messages_recorded": recorded,
+        "last_run": last_import.created_at.isoformat() if last_import else None,
+        "last_result": last_import.type if last_import else "",
+        "last_detail": (last_import.payload or {}) if last_import else {},
+        "sources": [{"title": (e.payload or {}).get("title", ""),
+                     "kind": (e.payload or {}).get("kind", ""),
+                     "chunks": (e.payload or {}).get("chunks", 0),
+                     "when": e.created_at.isoformat()} for e in imported],
+    }
     return {
         "facets": [{"name": "People", "n": len(people_rows)},
                    {"name": "About you", "n": len(fact_rows)}],
         "people": people_rows,
         "facts": fact_rows,
+        "history": history,
     }

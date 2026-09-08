@@ -3009,3 +3009,44 @@ def test_a_draft_built_on_imported_notes_never_auto_sends():
     assert why and "read it before it goes" in why
     d.used_imported_context = False
     assert draft_unsendable(d) is None
+
+
+def test_profile_reports_what_the_record_holds():
+    """The app cannot offer to import your history without being able to say
+    whether it has happened, is running, or has never been asked for."""
+    r = client.get("/v1/profile/knows", headers=AUTH)
+    assert r.status_code == 200
+    h = r.json()["history"]
+    assert set(h) == {"messages_recorded", "last_run", "last_result", "last_detail", "sources"}
+    assert h["messages_recorded"] == 0 and h["last_run"] is None   # nobody has imported yet
+
+    # a note the person hands over is accepted and, where memory can store it,
+    # comes back as a source they can see. Chunk storage is Postgres-only, so
+    # on the test database the call succeeds and stores nothing — assert the
+    # contract, and the visibility only where it is actually possible.
+    import superapp.memory as memory
+    r = client.post("/v1/knowledge/import", headers=AUTH, json={
+        "kind": "note", "title": "Board meeting, 14 March",
+        "text": "We agreed the walkaway number and that Priya runs the demo."})
+    assert r.status_code == 200
+    out = r.json()
+    assert set(out) >= {"ref_id", "chunks", "stored", "truncated"}
+    db = SessionLocal()
+    can_store = memory.available(db)
+    db.close()
+    assert out["stored"] is can_store
+    if can_store:
+        h = client.get("/v1/profile/knows", headers=AUTH).json()["history"]
+        assert any(s["title"] == "Board meeting, 14 March" for s in h["sources"])
+
+
+def test_history_import_needs_a_mailbox_and_says_it_is_read_only():
+    r = client.post("/v1/inbox/import/history", headers=AUTH, json={"months": 24})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["started"] is True and "read-only" in body["note"].lower()
+    # bounds are enforced, so a slip cannot ask for a decade of everything
+    assert client.post("/v1/inbox/import/history", headers=AUTH,
+                       json={"months": 999}).status_code == 422
+    assert client.post("/v1/inbox/import/history", headers=AUTH,
+                       json={"limit": 99999}).status_code == 422
