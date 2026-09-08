@@ -213,10 +213,10 @@ def _basket(label):
     db = SessionLocal()
     item = upsert_item(db, user_id=AUTH_UID, name=f"Coffee {label}", category="Beverages")
     record_purchase(db, user_id=AUTH_UID, item=item,
-                    purchased_at=NOW - timedelta(days=400),
+                    purchased_at=NOW - timedelta(days=80),
                     source="email", source_ref=f"old-{label}")
-    db.commit(); db.close()
-    r = client.post("/v1/grocery/basket", headers=AUTH, json={"platform": "list"})
+    db.commit(); item_id = item.id; db.close()
+    r = client.post("/v1/grocery/basket", headers=AUTH, json={"platform": "list", "item_ids": [item_id]})
     assert r.status_code == 200, r.text
     order = r.json()["order"]
     assert order is not None, "seeded item should be long overdue"
@@ -292,7 +292,8 @@ def test_connection_status_reports_capability_not_a_stored_boolean():
                     json={"platform": "walmart", "account_label": "rohit@example.com"})
     assert r.status_code == 200
     assert r.json()["available"] is False, "a preference is not a connection"
-    assert "Impact Radius" in r.json()["unavailable_reason"]
+    assert "not available" in r.json()["unavailable_reason"]
+    assert "Impact Radius" not in r.json()["unavailable_reason"]
 
     body = client.get("/v1/grocery/platforms", headers=AUTH).json()
     rows = {p["platform"]: p for p in body["platforms"]}
@@ -316,7 +317,8 @@ def test_instacart_handoff_is_unavailable_without_a_key_and_says_so():
     db = SessionLocal()
     with pytest.raises(StoreNotConnected) as exc:
         client_for(db, "harshith", "instacart")
-    assert "API key" in str(exc.value)
+    assert "unavailable" in str(exc.value)
+    assert "API key" not in str(exc.value)
     db.close()
 
 

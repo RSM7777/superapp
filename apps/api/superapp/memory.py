@@ -217,7 +217,7 @@ def recall(db: Session, *, user_id: str, query: str, k: int = 5,
         SELECT EXISTS(SELECT 1 FROM memory_chunks
           WHERE user_id = :u AND embed_status <> 'ok' {domain_filter})
     """), {"u": user_id, **dom}))
-    cols = ("id, domain, kind, content, created_at, event_at, source, author, "
+    cols = ("id, ref_id, domain, kind, content, created_at, event_at, source, author, "
             "title, source_ref, project, embed_status")
 
     try:
@@ -258,7 +258,7 @@ def recall(db: Session, *, user_id: str, query: str, k: int = 5,
         r = rows_by_id[i]
         when = r["event_at"] or r["created_at"]
         out.append({
-            "domain": r["domain"], "kind": r["kind"], "content": r["content"],
+            "domain": r["domain"], "kind": r["kind"], "content": r["content"], "ref_id": r["ref_id"],
             "when": when.isoformat() if when else "",
             "source": r["source"], "author": r["author"], "title": r["title"],
             "source_ref": r["source_ref"], "project": r["project"],

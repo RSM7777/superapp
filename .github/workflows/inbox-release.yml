@@ -54,3 +54,4 @@ jobs:
           cache-dependency-path: apps/mobile/package-lock.json
       - run: npm ci --ignore-scripts
       - run: npx tsc --noEmit
+      - run: npx vitest run

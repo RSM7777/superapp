@@ -58,8 +58,7 @@ CAPABILITIES = {
     "walmart": Capability(
         key="walmart", label="Walmart", can_handoff=False,
         can_read_history=False, needs_auth=False,
-        note="Not connected yet: adding to a Walmart cart needs Impact Radius "
-             "publisher approval, which Nano does not have."),
+        note="Walmart shopping is not available yet. Your shopping list stays saved in Nano."),
 }
 
 
@@ -105,7 +104,7 @@ class InstacartStore:
         self.api_key = api_key or get_settings().instacart_api_key
         if not self.api_key:
             raise StoreNotConnected(
-                "Instacart isn't set up on this server yet (no API key).")
+                "Instacart is unavailable right now. Your shopping list is saved.")
 
     @staticmethod
     def _line(line: OrderLine) -> dict:
@@ -144,7 +143,7 @@ class InstacartStore:
         except httpx.HTTPError as exc:
             # Loud. A handoff that silently produced no link would leave the
             # person believing a basket is waiting for them.
-            raise StoreNotConnected(f"Instacart did not answer ({type(exc).__name__}).") from exc
+            raise StoreNotConnected("Couldn’t open Instacart right now. Your shopping list is saved; please try again.") from exc
         if not url:
             raise StoreNotConnected("Instacart returned no basket link.")
         return {"platform": self.platform, "url": url,
@@ -153,7 +152,7 @@ class InstacartStore:
 
     def place_order(self, lines: list[OrderLine]) -> str:
         raise StoreUnsupported(
-            "Instacart's API hands over a basket; it does not check out for you. "
+            "Review your shopping list and complete checkout on Instacart. "
             "Open the link and pay on Instacart.")
 
 
@@ -170,8 +169,7 @@ class WalmartStore:
 
     def __init__(self, *_a, **_kw) -> None:
         raise StoreNotConnected(
-            "Walmart needs Impact Radius publisher approval before Nano can "
-            "build a cart there. It is not connected.")
+            "Walmart shopping is not available yet. Your shopping list is saved.")
 
 
 PLATFORMS = {k: (c.label, c.needs_auth) for k, c in CAPABILITIES.items()}

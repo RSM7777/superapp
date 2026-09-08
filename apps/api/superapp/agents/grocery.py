@@ -19,11 +19,13 @@ a basket and say why; a person places it.
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, or_, and_, func, union_all, exists, text, desc
 from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field, ValidationError
 
 from ..llm.provider import LLMProvider
-from ..models import GroceryOrder, InboxMessage, utcnow
+from ..models import GroceryOrder, GroceryReceipt, InboxMessage, MailHistory, utcnow
+from types import SimpleNamespace
 from ..sdui.blocks import (
     Action, ActionRow, InsightCard, ListBlock, ListItem, Screen, Section,
     Shelf, ShelfBlock, ShelfItem, TextBlock,
@@ -87,10 +89,18 @@ GROCERY_HINTS = ("walmart", "instacart", "kroger", "safeway", "wholefoods",
                  "publix", "wegmans", "grocery", "order", "receipt")
 
 MAX_RECEIPTS_PER_RUN = 12
-# How many times a message that failed to parse is retried before it is left
-# alone. Three covers an outage or a bad sample; beyond that it is the email,
-# not the weather.
+# After three quick failures, retry at most once a day. An outage must not
+# permanently retire a receipt, nor let a malformed message monopolize scans.
 MAX_RECEIPT_ATTEMPTS = 3
+
+
+class ReceiptLine(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    category: str = ""
+    brand: str = ""
+    size: str = ""
+    quantity: float = Field(default=1, gt=0, le=100, allow_inf_nan=False)
+    unit_price_cents: int = Field(default=0, ge=0, le=1_000_000)
 
 
 def _looks_like_grocery(msg: InboxMessage) -> bool:
@@ -106,50 +116,80 @@ def _parse_date(raw: str, fallback: datetime) -> datetime:
         return fallback
 
 
+def receipt_candidates(user_id: str | None = None):
+    """Find unread receipts before limiting, across both stores of mail."""
+    queries = []
+    for model, when in ((InboxMessage, InboxMessage.received_at), (MailHistory, MailHistory.occurred_at)):
+        ref = func.coalesce(func.nullif(model.gmail_msg_id, ""), model.id)
+        finished = exists(select(GroceryReceipt.id).where(
+            GroceryReceipt.user_id == model.user_id, GroceryReceipt.source_ref == ref,
+            or_(GroceryReceipt.status == "done", and_(GroceryReceipt.attempts >= MAX_RECEIPT_ATTEMPTS,
+                GroceryReceipt.updated_at > utcnow() - timedelta(days=1)))))
+        hay = func.lower(model.from_addr + " " + model.subject)
+        q = select(model.id, model.user_id, model.gmail_msg_id, model.from_addr, model.subject,
+                   model.body_text, when.label("received_at")).where(~finished,
+                   or_(*(hay.contains(h, autoescape=True) for h in GROCERY_HINTS)))
+        if user_id:
+            q = q.where(model.user_id == user_id)
+        if model is MailHistory:
+            q = q.where(MailHistory.direction == "inbound")
+        queries.append(q)
+    return union_all(*queries)
+
+
+def scan_pending_receipts(*, user_id: str | None = None, limit: int = 5) -> int:
+    """Dispatcher consumer; receipt failures cannot roll back mail ingestion."""
+    from ..db import SessionLocal
+    from .base import run_think
+    with SessionLocal() as db:
+        candidates = receipt_candidates(user_id).subquery()
+        users = list(db.scalars(select(candidates.c.user_id).distinct().limit(limit)))
+    scanned = 0
+    for uid in users:
+        with SessionLocal() as db:
+            try:
+                run_think(db, agent="grocery", user_id=uid, trigger={"kind": "receipt_scan"})
+                scanned += 1
+            except Exception:
+                db.rollback()
+    return scanned
+
+
 def _scan_receipts(db: Session, context: ContextSlice, provider: LLMProvider,
                    result: ThinkResult) -> dict:
     """Turn receipt mail into purchases. Idempotent per (receipt, item)."""
-    from ..models import Event
-
-    # Only a DEFINITIVE answer retires a message. The first cut marked every
-    # candidate read before it had one, so a refusal, an outage or a malformed
-    # reply skipped that receipt permanently — the purchase never existed and
-    # the shelf was quietly wrong forever. Failures are recorded separately and
-    # retried until MAX_RECEIPT_ATTEMPTS, then given up on out loud.
-    done, attempts = set(), {}
-    for e in db.scalars(
-            select(Event).where(
-                Event.user_id == context.user_id,
-                Event.type.in_(("grocery_receipt_read", "grocery_receipt_failed")))
-            .order_by(Event.created_at.desc()).limit(800)):
-        mid = e.payload.get("message_id")
-        if not mid:
-            continue
-        if e.type == "grocery_receipt_read":
-            done.add(mid)
-        else:
-            attempts[mid] = attempts.get(mid, 0) + 1
-    seen = done | {m for m, n in attempts.items() if n >= MAX_RECEIPT_ATTEMPTS}
-
-    cutoff = utcnow() - timedelta(days=120)
-    candidates = [m for m in db.scalars(
-        select(InboxMessage).where(
-            InboxMessage.user_id == context.user_id,
-            InboxMessage.received_at >= cutoff)
-        .order_by(InboxMessage.received_at.desc()).limit(300))
-        if m.id not in seen and _looks_like_grocery(m)]
+    if db.get_bind().dialect.name == "postgresql":
+        if not db.scalar(text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"),
+                         {"key": f"grocery_receipts:{context.user_id}"}):
+            return {"scanned": 0, "receipts": 0, "items": 0, "purchases": 0, "failed": 0, "given_up": 0}
+    candidates = [SimpleNamespace(**dict(row)) for row in db.execute(
+        receipt_candidates(context.user_id).order_by(desc("received_at")).limit(MAX_RECEIPTS_PER_RUN)
+    ).mappings()]
 
     stats = {"scanned": 0, "receipts": 0, "items": 0, "purchases": 0,
              "failed": 0, "given_up": 0}
     for msg in candidates[:MAX_RECEIPTS_PER_RUN]:
         stats["scanned"] += 1
-        resp = provider.complete(
-            db, user_id=context.user_id, agent="grocery", task="receipt_read",
-            system=RECEIPT_SYSTEM,
-            prompt=json.dumps({"from": msg.from_addr, "subject": msg.subject,
-                               "received_at": msg.received_at.isoformat(),
-                               "body": (msg.body_text or "")[:6000]}, sort_keys=True),
-            schema=RECEIPT_SCHEMA, effort="low")
+        ref = msg.gmail_msg_id or msg.id
+        receipt = db.scalar(select(GroceryReceipt).where(GroceryReceipt.user_id == context.user_id,
+                                                        GroceryReceipt.source_ref == ref))
+        if receipt is not None and receipt.status == "done":
+            continue
+        if receipt is None:
+            receipt = GroceryReceipt(user_id=context.user_id, source_ref=ref, attempts=0)
+            db.add(receipt)
+        receipt.attempts += 1
+        receipt.updated_at = utcnow()
+        try:
+            resp = provider.complete(
+                db, user_id=context.user_id, agent="grocery", task="receipt_read",
+                system=RECEIPT_SYSTEM,
+                prompt=json.dumps({"from": msg.from_addr, "subject": msg.subject,
+                                   "received_at": msg.received_at.isoformat(),
+                                   "body": (msg.body_text or "")[:6000]}, sort_keys=True),
+                schema=RECEIPT_SCHEMA, effort="low")
+        except Exception:
+            resp = SimpleNamespace(stubbed=False, refused=True, text="")
         failure = ""
         parsed = None
         if resp.stubbed:
@@ -161,21 +201,34 @@ def _scan_receipts(db: Session, context: ContextSlice, provider: LLMProvider,
                 parsed = json.loads(resp.text)
             except json.JSONDecodeError:
                 failure = "unparseable response"
+        if not failure and (not isinstance(parsed, dict) or not isinstance(parsed.get("items"), list)
+                            or not isinstance(parsed.get("is_grocery_receipt"), bool)
+                            or not isinstance(parsed.get("suspicious"), bool)
+                            or not isinstance(parsed.get("purchased_at", ""), str)):
+            failure = "invalid receipt response"
+        if not failure:
+            try:
+                parsed["items"] = [ReceiptLine.model_validate(line).model_dump() for line in parsed["items"][:60]]
+            except (ValidationError, TypeError):
+                failure = "invalid receipt line"
         if failure:
-            # Transient by assumption: retried next scan, and only abandoned
-            # after MAX_RECEIPT_ATTEMPTS so a permanently odd email cannot
-            # burn a model call on every run forever.
+            receipt.status = "failed"
+            # Retry promptly, then cool down to daily attempts after repeated
+            # failures. Canonical receipt text stays available throughout.
             stats["failed"] += 1
-            prior = attempts.get(msg.id, 0) + 1
+            prior = receipt.attempts
             if prior >= MAX_RECEIPT_ATTEMPTS:
                 stats["given_up"] += 1
             result.event_writes.append(EventWrite(
                 type="grocery_receipt_failed", domain="grocery",
                 payload={"message_id": msg.id, "from": msg.from_addr,
                          "reason": failure, "attempt": prior,
-                         "giving_up": prior >= MAX_RECEIPT_ATTEMPTS}))
+                         "retry_deferred": prior >= MAX_RECEIPT_ATTEMPTS}))
+            db.flush()
             continue
 
+        receipt.status = "done"
+        db.flush()
         # A real answer, whatever it says. "Not a receipt" is a definitive
         # answer and retires the message; a failure to answer is not.
         result.event_writes.append(EventWrite(
@@ -213,9 +266,17 @@ def propose_basket(db: Session, user_id: str, *, platform: str = "list",
     """Everything out or running low, collected into ONE draft basket.
 
     A draft, always. `grocery.place_order` is tier 3, so there is no path from
-    here to a charge without a person tapping confirm. Re-running replaces the
-    open draft rather than stacking duplicates.
+    here to a charge. Re-running preserves the open shopping list, including
+    the person's quantities, additions, and removals.
     """
+    # Once a list exists it belongs to the person. A background scan must
+    # never replace their quantities, additions, or removals.
+    existing = db.scalar(select(GroceryOrder).where(
+        GroceryOrder.user_id == user_id,
+        GroceryOrder.status.in_(("draft", "confirmed", "handed_off")))
+        .order_by(GroceryOrder.created_at.desc()).with_for_update())
+    if existing is not None:
+        return existing
     data = grocery_context(db, user_id)
     wanted = data["out_of_stock"] + data["running_low"]
     if not wanted:
@@ -227,12 +288,8 @@ def propose_basket(db: Session, user_id: str, *, platform: str = "list",
     lines = [{"item_id": s["id"], "name": s["name"], "quantity": 1,
               "unit": s["unit"], "note": s["reason"]} for s in wanted]
 
-    existing = db.scalar(select(GroceryOrder).where(
-        GroceryOrder.user_id == user_id, GroceryOrder.status == "draft"))
-    if existing is None:
-        existing = GroceryOrder(user_id=user_id, platform=platform)
-        db.add(existing)
-    existing.platform = platform
+    existing = GroceryOrder(user_id=user_id, platform=platform)
+    db.add(existing)
     existing.lines = lines
     existing.reason = (reason or
                        f"{len(data['out_of_stock'])} out, "
@@ -285,15 +342,13 @@ def grocery_render(context: ContextSlice) -> Screen:
     if not data.get("item_count"):
         blocks.append(TextBlock(text="Your shelf is empty.", variant="title"))
         blocks.append(TextBlock(
-            text="Link the mailbox that gets your grocery receipts and Nano fills "
-                 "the shelf from what you actually buy. Nothing here is guessed "
-                 "from a catalogue.",
+            text=("Nano is looking for grocery receipts in your connected mail. You can also tell Nano what you buy."
+                  if data.get("mail_connected") else "Connect your email so Nano can find your grocery receipts."),
             variant="body"))
         blocks.append(ActionRow(actions=[
-            Action(id="grocery.connect", label="Connect accounts"),
-            Action(id="grocery.add", label="＋ Add by hand", style="secondary"),
+            Action(id="grocery.add", label="Add item") if data.get("mail_connected") else Action(id="grocery.connect", label="Connect email"),
         ]))
-        return Screen(title="Groceries", theme="light",
+        return Screen(title="Groceries", theme="dark",
                       sections=[Section(title=None, blocks=blocks)])
 
     shelves = [Shelf(label=s["category"], tone="wood",
@@ -318,7 +373,7 @@ def grocery_render(context: ContextSlice) -> Screen:
                      trailing=("out" if s["status"] == "out" else f"{max(int(s['days_left']),0)}d"),
                      detail=f"{s['reason']}.\n\nLast bought: "
                             f"{(s['last_purchased_at'] or 'never')[:10]}. "
-                            f"Confidence: {s['basis']}.")
+                            f"{'Based on your purchases' if s['basis'] in ('measured', 'estimated') else 'Rough estimate until more receipts arrive'}.")
             for s in (out + low)[:12]]))
 
     measured = data.get("measured_count", 0)
@@ -335,19 +390,18 @@ def grocery_render(context: ContextSlice) -> Screen:
         o = pending[0]
         blocks.append(TextBlock(text="BASKET NANO BUILT", variant="caption"))
         blocks.append(TextBlock(
-            text=f"{len(o['lines'])} items — {o['reason']}. Nothing is ordered until "
-                 f"you say so.", variant="body"))
+            text=f"{len(o['lines'])} items on your shopping list. Review it and open it in Instacart to shop.", variant="body"))
         blocks.append(ActionRow(actions=[
-            Action(id=f"grocery.review:{o['id']}", label="Review basket"),
+            Action(id=f"grocery.review:{o['id']}", label="Review shopping list"),
             Action(id="grocery.add", label="＋ Add item", style="secondary"),
         ]))
     else:
         blocks.append(ActionRow(actions=[
             Action(id="grocery.add", label="＋ Add item"),
-            Action(id="grocery.connect", label="Accounts", style="secondary"),
+            Action(id="grocery.connect", label="Connected email", style="secondary"),
         ]))
 
-    return Screen(title="Groceries", theme="light",
+    return Screen(title="Groceries", theme="dark",
                   sections=[Section(title=None, blocks=blocks)])
 
 

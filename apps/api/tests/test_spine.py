@@ -507,7 +507,7 @@ def test_hub_screen_projects_all_verticals():
     hero = next(c for c in cards if c["name"] == "Inbox Zero")
     assert hero["screen"] == "inbox"
     grid = next(b for sec in screen["sections"] for b in sec["blocks"] if b["type"] == "agent_grid")
-    assert {i["screen"] for i in grid["items"]} == {"home", "finance", "stylist"}
+    assert {i["screen"] for i in grid["items"]} == {"home", "finance", "stylist", "grocery"}
     assert any("kcal" in i["sub"] or "logged" in i["sub"] for i in grid["items"])
 
 

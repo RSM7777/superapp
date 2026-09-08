@@ -50,17 +50,17 @@ migrate("head")
 from superapp import memory
 from superapp.agents.inbox import _evidence
 from superapp.models import GmailAccount, InboxMessage, SavedContext
-from superapp.context_notes import save_context
+from superapp.context_notes import save_context, forget_context
 from superapp.inbox.history_ingest import ensure_history_import
 from superapp.substrate.history import record_message
 from superapp.substrate.inbox import upsert_account
 
 with Session(engine) as db:
     assert db.scalar(text("SELECT history_id FROM gmail_accounts WHERE id='main-account'")) == "keep-cursor"
-    assert {"grocery_items", "grocery_orders", "grocery_links", "grocery_purchases"} <= set(inspect(engine).get_table_names())
+    assert {"grocery_items", "grocery_orders", "grocery_links", "grocery_purchases", "grocery_receipts"} <= set(inspect(engine).get_table_names())
     assert next(c for c in inspect(engine).get_columns("grocery_orders") if c["name"] == "external_id")["type"].length == 1024
     assert db.scalar(text("SELECT name FROM grocery_items WHERE id='upgrade-item'")) == "Milk"
-    assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0028"
+    assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0029"
     assert "saved_context" in inspect(engine).get_table_names()
     assert db.scalar(text("SELECT history_import_state IS NULL FROM gmail_accounts WHERE id='main-account'"))
     old_mail = record_message(db, user_id="outlook-user", account_email="me@example.com", msg={
@@ -121,6 +121,32 @@ with Session(engine) as db:
     assert note.indexed
     hit = memory.recall_for_agent(db, user_id="chat-user", agent="inbox", query="Cedarvale")[0]
     assert hit["source"] == "import" and hit["domain"] == "knowledge"
+    assert hit["ref_id"] == note.id
+    assert not forget_context(db, user_id="other-user", note_id=note.id)
+    assert forget_context(db, user_id="chat-user", note_id=note.id)
+    assert db.get(SavedContext, note.id) is None
+    assert db.scalar(text("SELECT count(*) FROM memory_chunks WHERE user_id='chat-user'")) == 0
+
+    # Both stores of mail feed the durable receipt consumer. A real PostgreSQL
+    # UNION query and the per-user extraction lock run here (SQLite cannot
+    # exercise the lock or enforce the original narrow source_ref column).
+    from types import SimpleNamespace
+    from superapp.agents import grocery
+    from superapp.agents.base import ThinkResult
+    from superapp.substrate import get_context
+    from superapp.models import GroceryPurchase, GroceryReceipt
+    long_ref = "graph-" + "A" * 180
+    record_message(db, user_id="receipts-user", account_email="me@example.com", msg={
+        "gmail_msg_id": long_ref, "from_addr": "receipts@instacart.com",
+        "subject": "Grocery receipt", "body_text": "Whole milk, 1 gallon, $4"})
+    provider = SimpleNamespace(complete=lambda *a, **kw: SimpleNamespace(stubbed=False, refused=False,
+        text=json.dumps({"is_grocery_receipt": True, "suspicious": False, "merchant": "Instacart",
+                         "items": [{"name": "Whole milk", "quantity": 1}]})))
+    context = get_context(db, agent="grocery", user_id="receipts-user")
+    assert grocery._scan_receipts(db, context, provider, ThinkResult())["purchases"] == 1
+    assert grocery._scan_receipts(db, context, provider, ThinkResult())["purchases"] == 0
+    assert db.scalar(select(GroceryPurchase.source_ref).where(GroceryPurchase.user_id == "receipts-user")) == long_ref
+    assert db.scalar(select(GroceryReceipt.status).where(GroceryReceipt.user_id == "receipts-user")) == "done"
 
     # A retrieval SQL failure is contained by a savepoint; the message remains
     # writable and no caller can interpret the failure as permission to clear.

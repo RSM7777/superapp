@@ -256,7 +256,7 @@ def test_saved_context_survives_index_failure_and_retries_as_private_reference(m
     assert captured[0]["source"] == "import" and captured[0]["domain"] == "knowledge"
 
 
-def test_incomplete_history_keeps_auto_decisions_held(monkeypatch, mailbox):
+def test_history_loading_does_not_block_healthy_reads_but_unindexed_notes_do(monkeypatch, mailbox):
     from superapp.agents import inbox
     from test_inbox_release import message
     uid, aid = mailbox
@@ -264,7 +264,8 @@ def test_incomplete_history_keeps_auto_decisions_held(monkeypatch, mailbox):
     monkeypatch.setattr(memory, "recall_for_agent", lambda *a, **kw: [])
     with SessionLocal() as db:
         msg = message(db, uid)
-        assert inbox._evidence(db, msg, deep=False)["retrieval_incomplete"]
+        assert not inbox._evidence(db, msg, deep=False)["retrieval_incomplete"]
+        assert inbox._evidence(db, msg, deep=False)["history_incomplete"]
         acct = db.get(GmailAccount, aid)
         history_ingest.ensure_history_import(acct)
         acct.history_import_state = {**acct.history_import_state, "status": "completed"}

@@ -171,7 +171,7 @@ def forecast(*, purchases: list, category: str = "",
     if last is None or last_at is None:
         return Forecast(status=STOCKED, days_supply=prior_days, days_left=prior_days,
                         out_on=None, basis="assumed",
-                        reason="never bought through Nano, so nothing to go on")
+                        reason="No purchase history yet.")
 
     rate, basis, _unit = consumption_rate(rows)
     if rate and rate > 0:

@@ -125,8 +125,7 @@ def list_platforms(user_id: str = Depends(current_user_id), db: Session = Depend
                 "kind": "email_receipts",
                 "connected": bool(_mailboxes(db, user_id)),
                 "note": "Nano builds your shelf from grocery receipts in your "
-                        "mailbox. No shopping platform lets an app read your "
-                        "order history."}}
+                        "connected email."}}
 
 
 def _mailboxes(db: Session, user_id: str) -> list[str]:
@@ -190,6 +189,7 @@ def unlink_platform(platform: str, user_id: str = Depends(current_user_id),
 class BasketBody(BaseModel):
     platform: str = "list"
     item_ids: list[str] = Field(default_factory=list)   # empty = everything low/out
+    append: bool = False
 
 
 @router.post("/grocery/basket")
@@ -203,6 +203,11 @@ def build_basket(body: BasketBody, user_id: str = Depends(current_user_id),
             GroceryItem.user_id == user_id, GroceryItem.id.in_(body.item_ids))))
         if not items:
             raise HTTPException(status_code=404, detail="None of those items exist")
+        if body.append:
+            from ..substrate.grocery import add_to_basket
+            order = add_to_basket(db, user_id=user_id, items=items)
+            db.commit()
+            return {"ok": True, "order": _order_dict(order)}
         order = db.scalar(select(GroceryOrder).where(
             GroceryOrder.user_id == user_id, GroceryOrder.status == "draft"))
         if order is None:
@@ -246,6 +251,45 @@ class ConfirmBody(BaseModel):
     fingerprint: str = Field(..., min_length=8, max_length=64)
 
 
+class BasketLineEdit(BaseModel):
+    item_id: str
+    quantity: float = Field(ge=1, le=99, allow_inf_nan=False)
+
+
+class BasketEdit(BaseModel):
+    fingerprint: str
+    lines: list[BasketLineEdit] = Field(max_length=100)
+    platform: str | None = None
+
+
+@router.patch("/grocery/orders/{order_id}")
+def edit_basket(order_id: str, body: BasketEdit, user_id: str = Depends(current_user_id),
+                db: Session = Depends(get_db)):
+    order = db.scalar(select(GroceryOrder).where(GroceryOrder.id == order_id,
+                      GroceryOrder.user_id == user_id).with_for_update())
+    if order is None:
+        raise HTTPException(404, "Shopping list not found.")
+    if order.status not in ("draft", "confirmed", "handed_off"):
+        raise HTTPException(409, "This shopping list is closed.")
+    if body.fingerprint != _basket_fingerprint(order.lines or []):
+        raise HTTPException(409, "Your shopping list changed. Please review the latest version.")
+    if body.platform is not None and body.platform not in ("list", "instacart"):
+        raise HTTPException(422, "That store isn't available yet.")
+    ids = [line.item_id for line in body.lines]
+    items = {i.id: i for i in db.scalars(select(GroceryItem).where(
+        GroceryItem.user_id == user_id, GroceryItem.id.in_(ids)))}
+    if len(items) != len(ids):
+        raise HTTPException(422, "Some items are no longer available. Refresh your list.")
+    order.lines = [{"item_id": l.item_id, "name": items[l.item_id].name,
+                    "quantity": l.quantity, "unit": items[l.item_id].unit, "note": "You added this"}
+                   for l in body.lines]
+    order.platform = body.platform or order.platform
+    order.status, order.external_id = "draft", ""
+    order.confirmed_by, order.confirmed_at = "", None
+    db.commit()
+    return {"ok": True, "order": _order_dict(order)}
+
+
 @router.post("/grocery/orders/{order_id}/confirm")
 def confirm_order(order_id: str, body: ConfirmBody,
                   user_id: str = Depends(current_user_id), db: Session = Depends(get_db)):
@@ -276,7 +320,7 @@ def confirm_order(order_id: str, body: ConfirmBody,
 
 
 @router.post("/grocery/orders/{order_id}/handoff")
-def handoff_order(order_id: str, user_id: str = Depends(current_user_id),
+def handoff_order(order_id: str, body: ConfirmBody | None = None, user_id: str = Depends(current_user_id),
                   db: Session = Depends(get_db)):
     """Hand the basket to the platform and return where to open it.
 
@@ -285,11 +329,18 @@ def handoff_order(order_id: str, user_id: str = Depends(current_user_id),
     reaches Nano, which is why this needs no confirmation gate: it spends
     nothing. It is a link, not a purchase.
     """
-    o = db.get(GroceryOrder, order_id)
+    o = db.scalar(select(GroceryOrder).where(GroceryOrder.id == order_id,
+                  GroceryOrder.user_id == user_id).with_for_update())
     if o is None or o.user_id != user_id:
         raise HTTPException(status_code=404, detail="No such order")
     if not (o.lines or []):
         raise HTTPException(status_code=422, detail="The basket is empty.")
+    if o.status not in ("draft", "confirmed", "handed_off"):
+        raise HTTPException(409, "This shopping list is closed.")
+    if body and body.fingerprint != _basket_fingerprint(o.lines or []):
+        raise HTTPException(409, "Your shopping list changed. Please review the latest version.")
+    if o.status == "handed_off" and o.external_id:
+        return {"ok": True, "url": o.external_id, "order": _order_dict(o)}
 
     lines = []
     for l in (o.lines or []):

@@ -290,7 +290,12 @@ def _evidence(db: Session, msg, *, deep: bool) -> dict:
     ev["history_incomplete"] = any((state or {}).get("status") != "completed" for state in history_states)
     unindexed_note = db.scalar(select(SavedContext.id).where(
         SavedContext.user_id == msg.user_id, SavedContext.indexed.is_(False)).limit(1))
-    ev["retrieval_incomplete"] |= ev["history_incomplete"] or unindexed_note is not None
+    # An unfinished historical backfill is not a failed read of current
+    # evidence, and must not disable unrelated, explicitly delegated work.
+    # Counts from history are lower bounds until backfill finishes.
+    if ev["history_incomplete"]:
+        ev["history_note"] = "Older history is still loading. Missing past exchanges mean unknown, not a new or unimportant sender."
+    ev["retrieval_incomplete"] |= unindexed_note is not None
 
     person = get_person(db, msg.user_id, msg.from_addr)
     if person is not None:

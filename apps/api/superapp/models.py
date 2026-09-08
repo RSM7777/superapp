@@ -533,6 +533,18 @@ class GroceryItem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class GroceryReceipt(Base):
+    """Durable extraction ledger shared by live and historical copies of mail."""
+    __tablename__ = "grocery_receipts"
+    __table_args__ = (UniqueConstraint("user_id", "source_ref", name="uq_grocery_receipt"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class GroceryPurchase(Base):
     """A thing actually bought, once. The only input the forecast trusts.
 
@@ -552,7 +564,7 @@ class GroceryPurchase(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     item_id: Mapped[str] = mapped_column(String(36), nullable=False)
     source: Mapped[str] = mapped_column(String(16), default="manual")  # email|platform|manual
-    source_ref: Mapped[str] = mapped_column(String(120), default="")   # receipt/order id
+    source_ref: Mapped[str] = mapped_column(String(512), default="")   # receipt/order id
     merchant: Mapped[str] = mapped_column(String(80), default="")
     quantity: Mapped[float] = mapped_column(Float, default=1.0)     # packages bought
     # The size of ONE package, normalised (ml | g | ct). Without it, buying a

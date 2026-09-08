@@ -6,14 +6,14 @@ stock). Everything here is deterministic; the model's only job in this vertical
 is reading receipts, which happens in the agent.
 """
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from ..grocery.predict import Bought, forecast
 from ..grocery.units import parse_size
-from ..models import (GroceryItem, GroceryLink, GroceryOrder, GroceryPurchase,
+from ..models import (GmailAccount, GroceryItem, GroceryLink, GroceryOrder, GroceryPurchase,
                       utcnow)
 
 # The shelves, in the order they are drawn. "Running low" and "Out of stock"
@@ -133,7 +133,7 @@ def record_purchase(db: Session, *, user_id: str, item: GroceryItem,
     when = purchased_at if purchased_at.tzinfo else purchased_at.replace(tzinfo=timezone.utc)
     parsed = parse_size(size_text or item.size or "")
     row = GroceryPurchase(user_id=user_id, item_id=item.id, source=source,
-                          source_ref=(source_ref or "")[:120], merchant=merchant[:80],
+                          source_ref=(source_ref or "")[:512], merchant=merchant[:80],
                           quantity=float(quantity or 1), unit_price_cents=unit_price_cents,
                           pack_amount=(parsed[0] if parsed else None),
                           pack_unit=(parsed[1] if parsed else ""),
@@ -186,7 +186,11 @@ def item_state(db: Session, user_id: str, item: GroceryItem, now=None,
 
 def grocery_context(db: Session, user_id: str) -> dict:
     """The shelf slice of ContextSlice.domain_data — exactly what the screen draws."""
-    items = list(db.scalars(select(GroceryItem).where(GroceryItem.user_id == user_id)
+    items = list(db.scalars(select(GroceryItem).where(GroceryItem.user_id == user_id,
+                            or_(GroceryItem.last_purchased_at.is_(None),
+                                GroceryItem.last_purchased_at >= utcnow() - timedelta(days=120),
+                                GroceryItem.pinned.is_(True), GroceryItem.on_list.is_(True),
+                                GroceryItem.declared_out_at.isnot(None)))
                             .order_by(GroceryItem.name)))
     # One query for every purchase this person has, grouped in memory. Asking
     # per item cost 63 queries for a 60-item shelf, on every render.
@@ -211,12 +215,13 @@ def grocery_context(db: Session, user_id: str) -> dict:
                  key=lambda s: s["days_left"])
 
     orders = list(db.scalars(select(GroceryOrder).where(
-        GroceryOrder.user_id == user_id, GroceryOrder.status.in_(("draft", "confirmed")))
+        GroceryOrder.user_id == user_id, GroceryOrder.status.in_(("draft", "confirmed", "handed_off")))
         .order_by(GroceryOrder.created_at.desc()).limit(5)))
     linked = list(db.scalars(select(GroceryLink).where(
         GroceryLink.user_id == user_id, GroceryLink.status == "linked")))
 
     return {
+        "mail_connected": bool(db.scalar(select(GmailAccount.id).where(GmailAccount.user_id == user_id).limit(1))),
         "shelves": shelves,
         "running_low": low,
         "out_of_stock": out,
@@ -243,3 +248,25 @@ def set_declared_out(db: Session, *, user_id: str, item_id: str, out: bool) -> G
         item.on_list = True
     item.updated_at = utcnow()
     return item
+
+
+def add_to_basket(db: Session, *, user_id: str, items: list[GroceryItem]) -> GroceryOrder:
+    order = db.scalar(select(GroceryOrder).where(GroceryOrder.user_id == user_id,
+                      GroceryOrder.status.in_(("draft", "confirmed", "handed_off")))
+                      .order_by(GroceryOrder.created_at.desc()).with_for_update())
+    if order is None:
+        order = GroceryOrder(user_id=user_id, platform="list", lines=[])
+        db.add(order)
+    lines = list(order.lines or [])
+    known = {line["item_id"] for line in lines}
+    for item in items:
+        item.on_list = True
+        if item.id not in known:
+            lines.append({"item_id": item.id, "name": item.name, "quantity": 1, "unit": item.unit, "note": "You added this"})
+            known.add(item.id)
+    order.lines = lines
+    order.reason = "Your shopping list"
+    order.status, order.external_id = "draft", ""
+    order.confirmed_by, order.confirmed_at = "", None
+    db.flush()
+    return order

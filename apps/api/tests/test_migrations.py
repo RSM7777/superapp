@@ -117,11 +117,11 @@ def test_current_main_database_upgrades_without_skipping_groceries(tmp_path):
         upgrade("head")
         upgrade("head")  # repeat deployment is inert
         tables = set(inspect(engine).get_table_names())
-        assert {"grocery_items", "grocery_orders", "grocery_links", "grocery_purchases", "saved_context"} <= tables
+        assert {"grocery_items", "grocery_orders", "grocery_links", "grocery_purchases", "grocery_receipts", "saved_context"} <= tables
         assert {"recovery_state", "sync_error", "last_sync_at", "history_import_state"} <= {
             c["name"] for c in inspect(engine).get_columns("gmail_accounts")}
         with engine.connect() as db:
             assert db.scalar(text("SELECT history_id FROM gmail_accounts WHERE id='existing-account'")) == "keep-cursor"
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0028"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0029"
     finally:
         engine.dispose()

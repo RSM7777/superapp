@@ -56,6 +56,15 @@ CONVERSE_SYSTEM = (
     "correction when they conflict. Do not say something is remembered unless "
     "you use the saving action. History is imported automatically for the last "
     "three years; never tell the person to use a profile import button.\n"
+    "FORGETTING: when the user asks to forget a saved note, use forget_context "
+    "with memory_id copied from saved_context.id or remembered.ref_id (kind=chat). "
+    "For 'forget that', resolve the note from the preceding conversation. "
+    "If more than one note could match, ask which; never guess or delete all. "
+    "Forgetting a note does not change mail rules or delete provider emails.\n"
+    "GROCERIES: use grocery_basket to add requested items to their shopping list. "
+    "New items can be added without a separate setup step. Open the grocery "
+    "screen to review quantities and continue to Instacart. Payment happens "
+    "on Instacart; never say Nano will place the order after a confirmation.\n"
     "NEVER MISS: \"I don't want to miss anything from X\", \"always show me "
     "Y\", \"flag anything from Z\", \"put those in Needs you\" is a standing "
     "promise: action=priority_mail. For a COMPANY or service, priority_sender "
@@ -180,7 +189,8 @@ CONVERSE_SCHEMA = {
                                  "set_nutrition", "log_water", "research_task",
                                  "connect_site", "auto_reply_rule", "end_conversation",
                                  "next_segment", "previous_segment", "repeat_segment",
-                                 "mute_mail", "priority_mail", "grocery_basket", "remember_context"]},
+                                 "mute_mail", "priority_mail", "grocery_basket", "remember_context", "forget_context"]},
+        "memory_id": {"type": "string"},
         "screen": {"type": "string", "enum": ["hub", "inbox", "home", "finance", "stylist", "flights", "grocery", ""]},
         "draft_id": {"type": "string"},
         "message_id": {"type": "string"},
@@ -206,7 +216,7 @@ CONVERSE_SCHEMA = {
     },
     "required": ["say", "action_type", "screen", "draft_id", "message_id", "reply_body",
                  "to_addr", "subject", "profile_json", "mute_kind", "mute_sender",
-                 "priority_kind", "priority_sender", "grocery_items", "listen"],
+                 "priority_kind", "priority_sender", "grocery_items", "memory_id", "listen"],
     "additionalProperties": False,
 }
 
@@ -343,6 +353,7 @@ def _stub_converse(user_text: str, voice_inbox: dict) -> dict:
                 "say": "On it."}
     for screen, words in [("inbox", ("mail", "email", "inbox")), ("home", ("meal", "food")),
                           ("flights", ("flight", "flights")),
+                          ("grocery", ("grocery", "groceries", "shopping list")),
                           ("finance", ("money", "spend")), ("stylist", ("wear", "outfit")),
                           ("hub", ("hub", "overview"))]:
         if any(w in t for w in words):
@@ -356,6 +367,16 @@ def _stub_converse(user_text: str, voice_inbox: dict) -> dict:
 def _execute(db: Session, user_id: str, parsed: dict, *, user_text: str | None = None) -> dict:
     """Run the model's action server-side. Returns adjustments to speak."""
     action = parsed["action_type"]
+    if action == "forget_context":
+        import re
+        explicit = user_text and re.search(r"\b(forget|delete|remove|stop remembering|don't remember)\b", user_text, re.I)
+        keep = user_text and re.search(r"\b(don.t|do not|never)\s+(forget|delete|remove)\b", user_text, re.I)
+        if not explicit or keep or not parsed.get("memory_id"):
+            return {"say": "Which saved detail would you like me to forget?", "action": "none"}
+        from ..context_notes import forget_context
+        if not forget_context(db, user_id=user_id, note_id=parsed["memory_id"]):
+            return {"say": "I couldn't find that saved note. Which detail did you mean?", "action": "none"}
+        return {"say": "I've forgotten that saved detail.", "acted": True}
     if action == "remember_context":
         if not user_text or not user_text.strip():
             return {"say": "Tell me what you'd like me to remember.", "action": "none"}
@@ -429,60 +450,32 @@ def _execute(db: Session, user_id: str, parsed: dict, *, user_text: str | None =
         return {"say": f"I’ll make sure you see mail from {who}. I’ll draft a reply when it needs one."}
 
     if action == "grocery_basket":
-        # "Order more milk", "we're out of coffee", "do the shop."
-        #
-        # Nano fills the basket and stops. Placing it is tier 3 — money and
-        # irreversible — so the spoken word builds a draft and the person
-        # confirms it on a screen where they can see exactly what they are
-        # buying. A voice channel is the worst possible place to authorise a
-        # charge: it is the easiest to mishear and the hardest to review.
         from sqlalchemy import select
-
+        from ..models import GroceryItem
+        from ..substrate.grocery import slugify, upsert_item, add_to_basket
         from ..agents.grocery import propose_basket
-        from ..models import GroceryItem, GroceryOrder
-        from ..substrate.grocery import slugify
 
-        names = [str(n).strip() for n in (parsed.get("grocery_items") or []) if str(n).strip()]
+        names = list(dict.fromkeys(str(n).strip()[:120] for n in
+                     (parsed.get("grocery_items") or []) if str(n).strip()))[:20]
         if names:
             shelf = list(db.scalars(select(GroceryItem).where(GroceryItem.user_id == user_id)))
-            by_slug = {i.slug: i for i in shelf}
-            found, missing = [], []
-            for name in names[:20]:
-                hit = by_slug.get(slugify(name))
-                if hit is None:
-                    # A near miss beats a new duplicate item: "milk" should
-                    # find "whole milk" rather than create a second shelf row.
-                    tokens = set(slugify(name).split())
-                    hit = next((i for i in shelf if tokens and tokens <= set(i.slug.split())), None)
-                (found if hit is not None else missing).append(hit or name)
-            if not found:
-                return {"say": f"I couldn't find {', '.join(missing[:3])} on your shelf. "
-                               f"Want me to add {'them' if len(missing) > 1 else 'it'}?"}
-            order = db.scalar(select(GroceryOrder).where(
-                GroceryOrder.user_id == user_id, GroceryOrder.status == "draft"))
-            if order is None:
-                order = GroceryOrder(user_id=user_id)
-                db.add(order)
-            order.lines = [{"item_id": i.id, "name": i.name, "quantity": 1,
-                            "unit": i.unit, "note": "you asked for this"} for i in found]
-            order.reason = "you asked for these"
-            order.confirmed_by = ""      # a new basket is a new question
-            order.confirmed_at = None
-            db.flush()
-            said = ", ".join(i.name for i in found[:4])
-            tail = (f" I couldn't find {', '.join(missing[:2])}." if missing else "")
-            db.commit()
-            return {"say": f"Basket has {said}.{tail} Have a look and confirm — "
-                           f"I won't order anything until you do.",
+            resolved = []
+            for name in names:
+                slug = slugify(name)
+                exact = next((i for i in shelf if i.slug == slug), None)
+                matches = [i for i in shelf if set(slug.split()) <= set(i.slug.split())]
+                if exact is None and len(matches) > 1:
+                    return {"say": f"Which {name} do you mean: {', '.join(i.name for i in matches[:3])}?", "action": "none"}
+                resolved.append((name, exact or (matches[0] if matches else None)))
+            found = [item or upsert_item(db, user_id=user_id, name=name)
+                     for name, item in resolved]
+            add_to_basket(db, user_id=user_id, items=found)
+            return {"say": f"Added {', '.join(i.name for i in found[:4])} to your shopping list. You can review it and open it in Instacart.",
                     "action": "open_screen", "screen": "grocery", "acted": True}
-        order = propose_basket(db, user_id, reason="you asked me to do the shop")
+        order = propose_basket(db, user_id, reason="Items running low")
         if order is None:
-            db.commit()
-            return {"say": "Nothing's low or out right now — your shelf looks fine."}
-        db.commit()
-        n = len(order.lines or [])
-        return {"say": f"I put {n} thing{'s' if n != 1 else ''} in the basket — "
-                       f"{order.reason}. Confirm it and I'll hand it over.",
+            return {"say": "I don't have any items to restock yet. Tell me what you'd like to add.", "action": "none"}
+        return {"say": f"Your shopping list has {len(order.lines or [])} items. Review it, then choose Open in Instacart to shop.",
                 "action": "open_screen", "screen": "grocery", "acted": True}
 
     if action == "mute_mail":
@@ -832,6 +825,14 @@ def converse(body: ConverseBody, user_id: str = Depends(current_user_id),
         except json.JSONDecodeError:
             parsed = _stub_converse(body.messages[-1].text, voice_inbox)
 
+    if (resp.stubbed or resp.refused) and body.messages[-1].role == "user":
+        from ..context_notes import resolve_forget
+        words = body.messages[-1].text.strip()
+        if words.lower().startswith(("forget ", "forget:")):
+            parsed = {"say": "", "action_type": "forget_context", "memory_id":
+                      resolve_forget(db, user_id, words, [t.text for t in body.messages[:-1] if t.role == "user"]),
+                      "screen": "", "listen": False}
+
     override = _execute(db, user_id, parsed, user_text=(
         body.messages[-1].text if body.messages[-1].role == "user" else None))
     if override.get("say"):
@@ -848,15 +849,11 @@ def converse(body: ConverseBody, user_id: str = Depends(current_user_id),
         parsed["screen"] = override["screen"]
 
     append_event(db, user_id=user_id, type="voice_command", agent="orb",
-                 payload={"heard": body.messages[-1].text[:200],
+                 payload={"heard": "" if parsed["action_type"] in ("remember_context", "forget_context") else body.messages[-1].text[:200],
                           "said": parsed["say"][:200],
                           "action": parsed["action_type"], "screen": parsed.get("screen", "")})
-    if parsed["action_type"] == "end_conversation" and len(body.messages) > 1:
-        convo = " / ".join(f"{t.role}: {t.text[:150]}" for t in body.messages[-12:])
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
-        remember(db, user_id=user_id, domain="identity", kind="conversation",
-                 ref_id=f"voice-{stamp}",
-                 content=f"Voice conversation with Nano: {convo[:1600]}")
+    # Durable personal context is saved explicitly above. Archiving the whole
+    # conversation here would resurrect a note the user just asked to forget.
     db.commit()
     return {
         "say": parsed["say"], "action": parsed["action_type"],
