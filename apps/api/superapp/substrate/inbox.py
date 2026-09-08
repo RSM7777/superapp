@@ -214,6 +214,9 @@ def inbox_context(db: Session, user_id: str) -> dict:
         "primary": i == 0,
         "color": _BOX_COLORS[i % len(_BOX_COLORS)],
         "count": sum(1 for m in msgs if m.account_email == a.email),
+        # So the app can name the mailbox honestly instead of assuming Gmail,
+        # and send a reconnect back to the provider it belongs to.
+        "provider": getattr(a, "provider", "") or "gmail",
     } for i, a in enumerate(_accts)]
     return {
         "connected": bool(_accts),

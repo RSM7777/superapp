@@ -20,7 +20,10 @@ const SERIF = "InstrumentSerif_400Regular";
 const SANS = "InstrumentSans_400Regular";
 const SANS_SEMI = "InstrumentSans_600SemiBold";
 
-type Mailbox = { email: string; primary: boolean; color: string; count: number };
+type Mailbox = {
+  email: string; primary: boolean; color: string; count: number; provider?: string;
+};
+type Provider = { provider: string; label: string; hint: string };
 type PersonRow = { name: string; email: string; relationship: string; summary: string };
 type FactRow = { domain: string; key: string; belief: string };
 type Facet = { name: string; n: number };
@@ -59,6 +62,8 @@ export function ProfileScreen({
   const [knows, setKnows] = useState<Knows | null>(null);
   const [facet, setFacet] = useState("People");
   const [linking, setLinking] = useState(false);
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [choosing, setChoosing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [teachOpen, setTeachOpen] = useState(false);
   const [teachTitle, setTeachTitle] = useState("");
@@ -69,9 +74,10 @@ export function ProfileScreen({
 
   const refresh = useCallback(async () => {
     try {
-      const [iRes, kRes] = await Promise.all([
+      const [iRes, kRes, pRes] = await Promise.all([
         fetch(`${apiUrl}/v1/inbox/state`, { headers: auth }),
         fetch(`${apiUrl}/v1/profile/knows`, { headers: auth }),
+        fetch(`${apiUrl}/v1/mail/providers`, { headers: auth }),
       ]);
       if (!alive.current) return;
       if (iRes.ok) {
@@ -84,6 +90,7 @@ export function ProfileScreen({
         setPrioSenders(d.priority_senders ?? []);
       }
       if (kRes.ok) setKnows(await kRes.json());
+      if (pRes.ok) setProviders((await pRes.json()).providers ?? []);
     } catch { /* quiet */ }
   }, [apiUrl, auth]);
 
@@ -93,11 +100,14 @@ export function ProfileScreen({
     return () => { alive.current = false; };
   }, [refresh]);
 
-  const linkMailbox = useCallback(async () => {
+  const linkMailbox = useCallback(async (provider = "gmail") => {
     if (linking) return;
+    setChoosing(false);
     setLinking(true);
     try {
-      const res = await fetch(`${apiUrl}/v1/gmail/auth-url`, { headers: auth });
+      // Each provider owns its consent URL; the callback deep link is shared,
+      // so the app comes back the same way whichever one the person picked.
+      const res = await fetch(`${apiUrl}/v1/${provider}/auth-url`, { headers: auth });
       if (res.ok) {
         const { auth_url } = await res.json();
         await WebBrowser.openAuthSessionAsync(auth_url, "superapp://gmail-connected");
@@ -227,11 +237,12 @@ export function ProfileScreen({
                 {m.primary ? <Text style={s.primaryBadge}>PRIMARY</Text> : null}
               </View>
               <Text style={s.mailMeta}>
-                Gmail · {m.count} synced{reauth && m.primary ? " · reconnect needed" : ""}
+                {m.provider === "outlook" ? "Outlook" : m.provider === "stub" ? "Offline" : "Gmail"}
+                {" · "}{m.count} synced{reauth && m.primary ? " · reconnect needed" : ""}
               </Text>
             </View>
             {reauth && m.primary ? (
-              <Pressable onPress={linkMailbox} hitSlop={8}>
+              <Pressable onPress={() => linkMailbox(m.provider || "gmail")} hitSlop={8}>
                 <Text style={[s.chip, { color: C.rose }]}>RECONNECT</Text>
               </Pressable>
             ) : (
@@ -239,7 +250,10 @@ export function ProfileScreen({
             )}
           </View>
         ))}
-        <Pressable style={[s.linkRow, mailboxes.length > 0 && s.divider]} onPress={linkMailbox}>
+        <Pressable style={[s.linkRow, mailboxes.length > 0 && s.divider]} disabled={linking}
+                   onPress={() => (providers.length > 1
+                     ? setChoosing(true)
+                     : linkMailbox(providers[0]?.provider ?? "gmail"))}>
           <View style={s.plus}><Text style={{ color: C.lav, fontSize: 18, marginTop: -2 }}>+</Text></View>
           <Text style={s.linkText}>{linking ? "Opening sign-in…" : "Link another mailbox"}</Text>
         </Pressable>
@@ -426,6 +440,40 @@ export function ProfileScreen({
         )}
       </View>
 
+      <Modal visible={choosing} transparent animationType="slide"
+             onRequestClose={() => setChoosing(false)}>
+        <View style={s.sheetWrap}>
+          <View style={s.sheet}>
+            <Text style={s.sheetTitle}>Which mailbox?</Text>
+            <Text style={s.sheetSub}>
+              You sign in with the provider. Nano never sees the password, and only reads the
+              mailbox you grant it.
+            </Text>
+            {providers.map((pv) => (
+              <Pressable key={pv.provider} style={s.providerRow}
+                         onPress={() => linkMailbox(pv.provider)}>
+                <View style={[s.providerMark,
+                              pv.provider === "outlook" && { backgroundColor: "rgba(0,120,212,0.18)",
+                                                             borderColor: "rgba(0,120,212,0.5)" }]}>
+                  <Text style={[s.providerMarkText,
+                                pv.provider === "outlook" && { color: "#5BA8F5" }]}>
+                    {pv.label.slice(0, 1)}
+                  </Text>
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={s.providerName}>{pv.label}</Text>
+                  <Text style={s.providerHint}>{pv.hint}</Text>
+                </View>
+                <Text style={s.providerGo}>{"›"}</Text>
+              </Pressable>
+            ))}
+            <Pressable style={s.ghost} onPress={() => setChoosing(false)}>
+              <Text style={s.ghostText}>Not now</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={teachOpen} transparent animationType="slide"
              onRequestClose={() => setTeachOpen(false)}>
         <View style={s.sheetWrap}>
@@ -533,6 +581,18 @@ const s = StyleSheet.create({
     backgroundColor: "rgba(199,184,255,0.10)", borderWidth: 1, borderColor: "rgba(199,184,255,0.24)",
   },
   rangeText: { fontFamily: SANS_SEMI, fontSize: 12.5, color: C.lav },
+  providerRow: {
+    flexDirection: "row", alignItems: "center", gap: 14, padding: 14, borderRadius: 16,
+    backgroundColor: "rgba(25,18,51,0.6)", borderWidth: 1, borderColor: "rgba(199,184,255,0.16)",
+  },
+  providerMark: {
+    width: 40, height: 40, borderRadius: 14, alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(199,184,255,0.14)", borderWidth: 1, borderColor: "rgba(199,184,255,0.32)",
+  },
+  providerMarkText: { fontFamily: SERIF, fontSize: 20, color: C.lav },
+  providerName: { fontFamily: SANS_SEMI, fontSize: 15, color: C.text },
+  providerHint: { fontFamily: SANS, fontSize: 12, color: C.muted, marginTop: 2 },
+  providerGo: { fontFamily: SANS, fontSize: 20, color: C.muted },
   sheetWrap: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(2,2,6,0.72)" },
   sheet: {
     backgroundColor: "#0B0A16", borderTopLeftRadius: 26, borderTopRightRadius: 26,

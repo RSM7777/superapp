@@ -109,6 +109,67 @@ height:100vh;margin:0;gap:12px'>
 </body>""")
 
 
+@router.get("/mail/providers")
+def mail_providers():
+    """What a person may link. The app renders this rather than a hard-coded
+    list, so a provider the server has no credentials for is never a button
+    that cannot finish a sign-in."""
+    from ..inbox.factory import offered
+    return {"providers": offered()}
+
+
+@router.get("/outlook/auth-url")
+def outlook_auth_url(user_id: str = Depends(current_user_id)):
+    from ..inbox.factory import configured, link_client
+    if not configured("outlook"):
+        raise HTTPException(status_code=400,
+                            detail="Set SUPERAPP_MICROSOFT_CLIENT_ID and _SECRET first")
+    return {"auth_url": link_client("outlook").auth_url(state=_sign_state(user_id))}
+
+
+@router.get("/outlook/callback")
+def outlook_callback(code: str = "", state: str = "", error: str = "",
+                     error_description: str = "", db: Session = Depends(get_db)):
+    """OAuth redirect target for Microsoft. Identity comes from the same
+    HMAC-signed state Gmail uses, because the browser cannot send our bearer.
+
+    Microsoft reports a refusal by redirecting here with `error`, so say what
+    happened instead of failing on a missing code.
+    """
+    if error:
+        return HTMLResponse(_connected_page(
+            f"Microsoft didn't connect: {error_description or error}", ok=False))
+    if not code:
+        return HTMLResponse(_connected_page("No authorization code came back.", ok=False))
+    user_id = _verify_state(state)
+    from ..inbox.factory import link_client
+    from ..inbox.outlook_client import OutlookClient
+    client = link_client("outlook")
+    token = client.exchange_code(code)
+    email = OutlookClient(token).address()
+    if not email:
+        return HTMLResponse(_connected_page(
+            "Microsoft didn't say which mailbox that was.", ok=False))
+    _connect(db, user_id=user_id, email=email, token=token, provider="outlook")
+    db.commit()
+    return HTMLResponse(_connected_page(f"{email} connected"))
+
+
+def _connected_page(message: str, ok: bool = True) -> str:
+    tick = "&#10003;" if ok else "&#9888;"
+    return f"""<!doctype html><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<body style='font-family:-apple-system,sans-serif;background:#08070E;color:#F4F2FA;
+display:flex;flex-direction:column;align-items:center;justify-content:center;
+height:100vh;margin:0;gap:12px;text-align:center;padding:0 24px'>
+<div style='font-size:40px'>{tick}</div>
+<div style='font-size:20px'>{message}</div>
+<div style='color:#8A87A3;font-size:14px'>Returning to Super App&hellip;</div>
+<a href='superapp://gmail-connected' style='color:#C7B8FF'>Open the app</a>
+<script>setTimeout(function() {{ location.href = 'superapp://gmail-connected'; }}, 900);</script>
+</body>"""
+
+
 @router.post("/inbox/sync")
 def sync_now(user_id: str = Depends(current_user_id), db: Session = Depends(get_db)):
     return run_think(db, agent="inbox", user_id=user_id, trigger={"kind": "email_sync"})
