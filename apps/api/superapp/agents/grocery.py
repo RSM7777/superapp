@@ -87,6 +87,10 @@ GROCERY_HINTS = ("walmart", "instacart", "kroger", "safeway", "wholefoods",
                  "publix", "wegmans", "grocery", "order", "receipt")
 
 MAX_RECEIPTS_PER_RUN = 12
+# How many times a message that failed to parse is retried before it is left
+# alone. Three covers an outage or a bad sample; beyond that it is the email,
+# not the weather.
+MAX_RECEIPT_ATTEMPTS = 3
 
 
 def _looks_like_grocery(msg: InboxMessage) -> bool:
@@ -107,10 +111,25 @@ def _scan_receipts(db: Session, context: ContextSlice, provider: LLMProvider,
     """Turn receipt mail into purchases. Idempotent per (receipt, item)."""
     from ..models import Event
 
-    seen = {e.payload.get("message_id") for e in db.scalars(
-        select(Event).where(Event.user_id == context.user_id,
-                            Event.type == "grocery_receipt_read")
-        .order_by(Event.created_at.desc()).limit(400))}
+    # Only a DEFINITIVE answer retires a message. The first cut marked every
+    # candidate read before it had one, so a refusal, an outage or a malformed
+    # reply skipped that receipt permanently — the purchase never existed and
+    # the shelf was quietly wrong forever. Failures are recorded separately and
+    # retried until MAX_RECEIPT_ATTEMPTS, then given up on out loud.
+    done, attempts = set(), {}
+    for e in db.scalars(
+            select(Event).where(
+                Event.user_id == context.user_id,
+                Event.type.in_(("grocery_receipt_read", "grocery_receipt_failed")))
+            .order_by(Event.created_at.desc()).limit(800)):
+        mid = e.payload.get("message_id")
+        if not mid:
+            continue
+        if e.type == "grocery_receipt_read":
+            done.add(mid)
+        else:
+            attempts[mid] = attempts.get(mid, 0) + 1
+    seen = done | {m for m, n in attempts.items() if n >= MAX_RECEIPT_ATTEMPTS}
 
     cutoff = utcnow() - timedelta(days=120)
     candidates = [m for m in db.scalars(
@@ -120,7 +139,8 @@ def _scan_receipts(db: Session, context: ContextSlice, provider: LLMProvider,
         .order_by(InboxMessage.received_at.desc()).limit(300))
         if m.id not in seen and _looks_like_grocery(m)]
 
-    stats = {"scanned": 0, "receipts": 0, "items": 0, "purchases": 0}
+    stats = {"scanned": 0, "receipts": 0, "items": 0, "purchases": 0,
+             "failed": 0, "given_up": 0}
     for msg in candidates[:MAX_RECEIPTS_PER_RUN]:
         stats["scanned"] += 1
         resp = provider.complete(
@@ -130,17 +150,38 @@ def _scan_receipts(db: Session, context: ContextSlice, provider: LLMProvider,
                                "received_at": msg.received_at.isoformat(),
                                "body": (msg.body_text or "")[:6000]}, sort_keys=True),
             schema=RECEIPT_SCHEMA, effort="low")
-        # Mark it read either way: a message that is not a receipt must not be
-        # re-read on every sync forever.
+        failure = ""
+        parsed = None
+        if resp.stubbed:
+            failure = "no model configured"
+        elif resp.refused:
+            failure = "the model declined to read it"
+        else:
+            try:
+                parsed = json.loads(resp.text)
+            except json.JSONDecodeError:
+                failure = "unparseable response"
+        if failure:
+            # Transient by assumption: retried next scan, and only abandoned
+            # after MAX_RECEIPT_ATTEMPTS so a permanently odd email cannot
+            # burn a model call on every run forever.
+            stats["failed"] += 1
+            prior = attempts.get(msg.id, 0) + 1
+            if prior >= MAX_RECEIPT_ATTEMPTS:
+                stats["given_up"] += 1
+            result.event_writes.append(EventWrite(
+                type="grocery_receipt_failed", domain="grocery",
+                payload={"message_id": msg.id, "from": msg.from_addr,
+                         "reason": failure, "attempt": prior,
+                         "giving_up": prior >= MAX_RECEIPT_ATTEMPTS}))
+            continue
+
+        # A real answer, whatever it says. "Not a receipt" is a definitive
+        # answer and retires the message; a failure to answer is not.
         result.event_writes.append(EventWrite(
             type="grocery_receipt_read", domain="grocery",
-            payload={"message_id": msg.id, "from": msg.from_addr}))
-        if resp.stubbed or resp.refused:
-            continue
-        try:
-            parsed = json.loads(resp.text)
-        except json.JSONDecodeError:
-            continue
+            payload={"message_id": msg.id, "from": msg.from_addr,
+                     "is_receipt": bool(parsed.get("is_grocery_receipt"))}))
         if not parsed.get("is_grocery_receipt") or parsed.get("suspicious"):
             continue
         stats["receipts"] += 1
@@ -159,6 +200,7 @@ def _scan_receipts(db: Session, context: ContextSlice, provider: LLMProvider,
                 db, user_id=context.user_id, item=item, purchased_at=when,
                 quantity=float(line.get("quantity") or 1), source="email",
                 source_ref=msg.gmail_msg_id or msg.id, merchant=merchant,
+                size_text=str(line.get("size", "")),
                 unit_price_cents=(int(line.get("unit_price_cents") or 0) or None))
             if wrote is not None:
                 stats["purchases"] += 1

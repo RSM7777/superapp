@@ -45,12 +45,19 @@ class StoreUnsupported(StoreError):
 
 @dataclass
 class OrderLine:
-    """One thing to buy. `item_id` links back to the shelf."""
+    """One thing to buy. `item_id` links back to the shelf.
+
+    `product_ref` is a UPC or a store product id where we know one, so a
+    handoff basket contains the exact product this household buys rather than
+    a store's best guess at the word "milk".
+    """
     item_id: str
     name: str
     quantity: float = 1
     unit: str = ""
     note: str = ""
+    product_ref: str = ""
+    product_ref_kind: str = ""       # upc | id
 
 
 @dataclass
@@ -73,6 +80,16 @@ class StoreClient(Protocol):
 
     def quote(self, lines: list[OrderLine]) -> Quote:
         """Price a basket. Read-only, spends nothing, commits to nothing."""
+        ...
+
+    def handoff(self, lines: list[OrderLine]) -> dict:
+        """Hand the basket to the platform and return where to open it.
+
+        This is what the real platforms actually offer, and what the product
+        promises: Nano fills the basket, the person opens it and pays. Returns
+        {"platform", "url", "note"}; an empty url means "there is nowhere to
+        send you", never a broken link.
+        """
         ...
 
     def place_order(self, lines: list[OrderLine]) -> str:

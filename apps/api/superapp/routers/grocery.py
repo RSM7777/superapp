@@ -105,47 +105,74 @@ class LinkBody(BaseModel):
 
 @router.get("/grocery/platforms")
 def list_platforms(user_id: str = Depends(current_user_id), db: Session = Depends(get_db)):
-    """What can be linked, and what ordering each one actually supports.
+    """What each platform can actually do — decided by building the client, not
+    by a row saying "linked".
 
-    `can_order` is false for the real platforms today and the UI must respect
-    it: neither Walmart nor Instacart publishes a consumer ordering API a
-    third-party assistant can call on someone's behalf. Linking them buys
-    receipt matching and price context. Showing a Place Order button that
-    cannot work is worse than not showing one.
+    The first version let `/link` write status="linked" with no authentication
+    behind it, so the screen claimed a connection that did not exist. Nothing
+    here is a promise: `available` is the result of trying.
+
+    `can_read_history` is false everywhere, deliberately. Neither Instacart's
+    Developer Platform nor Walmart's affiliate API exposes a consumer's past
+    orders to a third party. The shelf comes from email receipts, and the
+    connect screen has to say that, or someone will believe Nano is reading
+    their Instacart account and never forward the receipts it needs.
     """
-    linked = {l.platform: l for l in db.scalars(
-        select(GroceryLink).where(GroceryLink.user_id == user_id))}
-    out = []
-    for key, (label, needs_link) in PLATFORMS.items():
-        row = linked.get(key)
-        out.append({"platform": key, "label": label,
-                    "needs_link": needs_link,
-                    "linked": bool(row and row.status == "linked"),
-                    "account_label": row.account_label if row else "",
-                    "can_order": False,
-                    "note": ("Receipts and prices. Nano builds the basket; you "
-                             "check out in their app." if needs_link else
-                             "A list you shop from.")})
-    return {"platforms": out}
+    from ..grocery.factory import capabilities
+
+    return {"platforms": capabilities(db, user_id),
+            "history_source": {
+                "kind": "email_receipts",
+                "connected": bool(_mailboxes(db, user_id)),
+                "note": "Nano builds your shelf from grocery receipts in your "
+                        "mailbox. No shopping platform lets an app read your "
+                        "order history."}}
+
+
+def _mailboxes(db: Session, user_id: str) -> list[str]:
+    from ..substrate.inbox import accounts as _accounts
+    return [a.email for a in _accounts(db, user_id)]
 
 
 @router.post("/grocery/platforms/link")
 def link_platform(body: LinkBody, user_id: str = Depends(current_user_id),
                   db: Session = Depends(get_db)):
+    """Record an intent to use a platform. This does NOT authenticate anything.
+
+    Kept deliberately weak, and honest about it: none of these platforms offers
+    Nano a consumer sign-in. Instacart's basket handoff uses a server-wide key
+    and needs nothing from the person; Walmart needs an approval Nano does not
+    have. So this endpoint stores a preference and returns what that preference
+    actually buys — it never reports "connected".
+    """
+    from ..grocery.base import StoreError
+    from ..grocery.factory import client_for
+    from ..grocery.providers import CAPABILITIES
+
     platform = body.platform.strip().lower()
-    if platform not in PLATFORMS:
+    cap = CAPABILITIES.get(platform)
+    if cap is None:
         raise HTTPException(status_code=422, detail=f"Unknown platform {platform!r}")
+
+    try:
+        client_for(db, user_id, platform)
+        available, reason = True, ""
+    except StoreError as exc:
+        available, reason = False, str(exc)
+
     row = db.scalar(select(GroceryLink).where(
         GroceryLink.user_id == user_id, GroceryLink.platform == platform))
     if row is None:
         row = GroceryLink(user_id=user_id, platform=platform)
         db.add(row)
-    row.status = "linked"
+    # "preferred" is the truth: the person chose it. Whether it works is
+    # answered by trying, every time.
+    row.status = "preferred"
     row.account_label = body.account_label[:120]
-    append_event(db, user_id=user_id, type="grocery_platform_linked", agent="grocery",
-                 domain="grocery", payload={"platform": platform})
+    append_event(db, user_id=user_id, type="grocery_platform_preferred", agent="grocery",
+                 domain="grocery", payload={"platform": platform, "available": available})
     db.commit()
-    return {"ok": True, "platform": platform, "can_order": False}
+    return {"ok": True, **cap.as_dict(available=available, reason=reason)}
 
 
 @router.post("/grocery/platforms/{platform}/unlink")
@@ -154,7 +181,7 @@ def unlink_platform(platform: str, user_id: str = Depends(current_user_id),
     row = db.scalar(select(GroceryLink).where(
         GroceryLink.user_id == user_id, GroceryLink.platform == platform.lower()))
     if row is None:
-        raise HTTPException(status_code=404, detail="Not linked")
+        raise HTTPException(status_code=404, detail="Not set")
     row.status = "revoked"
     db.commit()
     return {"ok": True}
@@ -246,6 +273,46 @@ def confirm_order(order_id: str, body: ConfirmBody,
                     payload={"order_id": o.id, "lines": len(o.lines or [])})
     db.commit()
     return {"ok": True, "order": _order_dict(o)}
+
+
+@router.post("/grocery/orders/{order_id}/handoff")
+def handoff_order(order_id: str, user_id: str = Depends(current_user_id),
+                  db: Session = Depends(get_db)):
+    """Hand the basket to the platform and return where to open it.
+
+    This — not `/place` — is what the product does. Nano fills the basket;
+    the person opens the link, picks their store, and pays there. No card ever
+    reaches Nano, which is why this needs no confirmation gate: it spends
+    nothing. It is a link, not a purchase.
+    """
+    o = db.get(GroceryOrder, order_id)
+    if o is None or o.user_id != user_id:
+        raise HTTPException(status_code=404, detail="No such order")
+    if not (o.lines or []):
+        raise HTTPException(status_code=422, detail="The basket is empty.")
+
+    lines = []
+    for l in (o.lines or []):
+        item = db.get(GroceryItem, l.get("item_id", ""))
+        lines.append(OrderLine(
+            item_id=l.get("item_id", ""), name=l.get("name", ""),
+            quantity=float(l.get("quantity") or 1), unit=l.get("unit", ""),
+            product_ref=(item.product_ref if item is not None else ""),
+            product_ref_kind=(item.product_ref_kind if item is not None else "")))
+    try:
+        result = client_for(db, user_id, o.platform).handoff(lines)
+    except StoreError as exc:
+        # 422, not 500: nothing broke. This platform cannot take the basket,
+        # and the person needs to hear exactly that rather than "try again".
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    o.status = "handed_off"
+    o.external_id = (result.get("url") or "")[:120]
+    append_event(db, user_id=user_id, type="grocery_basket_handed_off", agent="grocery",
+                 domain="grocery", payload={"order_id": o.id, "platform": o.platform,
+                                            "lines": len(o.lines or [])})
+    db.commit()
+    return {"ok": True, **result, "order": _order_dict(o)}
 
 
 @router.post("/grocery/orders/{order_id}/place")

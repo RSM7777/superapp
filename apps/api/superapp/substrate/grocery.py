@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..grocery.predict import CATEGORY_DAYS, forecast
+from ..grocery.predict import Bought, forecast
+from ..grocery.units import parse_size
 from ..models import (GroceryItem, GroceryLink, GroceryOrder, GroceryPurchase,
                       utcnow)
 
@@ -24,25 +25,47 @@ _CANON = {c.lower(): c for c in CATEGORIES}
 # Packaging and marketing words. Stripped so the same product spelled two ways
 # collapses to one shelf item; kept short, because over-stripping merges things
 # that are genuinely different ("whole milk" vs "oat milk" must not collide).
-_NOISE_WORDS = re.compile(
-    r"\b(organic|fresh|large|small|value|pack|pk|pkg|ct|count|ea|each|dozen|"
-    r"oz|lb|lbs|kg|g|mg|ml|l|lt|ltr|gal|gallon|qt|pt|bag|box|btl|bottle|jar|can|"
-    r"family|size|great|brand)\b", re.I)
+# Packaging and merchandising words only. NOT variants: "whole", "oat", "1%",
+# "organic", "decaf" and their kind distinguish genuinely different products and
+# must survive, or two things a household buys separately become one shelf item
+# whose purchase history is an average of neither.
+_PACKAGING = re.compile(
+    r"\b(pack|pk|pkg|ct|count|ea|each|dozen|doz|bag|box|btl|bottle|jar|can|"
+    r"carton|tub|roll|rolls|oz|floz|lb|lbs|kg|g|gr|mg|ml|l|lt|ltr|gal|gallon|"
+    r"qt|quart|pt|pint|liter|litre|gram|grams|pound|pounds|ounce|ounces)\b", re.I)
+_MERCHANDISING = re.compile(
+    r"\b(great|value|brand|family|size|club|select|signature|essentials?)\b", re.I)
+# A number glued to or followed by a unit is a package size, not a name.
+# Handled before bare digits so "1gal" and "1 gal" both disappear.
+_SIZE_EXPR = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:x\s*\d+(?:\.\d+)?\s*)?"
+    r"(?:oz|floz|fl\s*oz|lb|lbs|kg|g|gr|mg|ml|l|lt|ltr|gal|gallon|qt|quart|pt|"
+    r"pint|ct|count|pk|pack|dozen|doz|liter|litre|gram|grams|pound|pounds|"
+    r"ounce|ounces)\b", re.I)
 
 
 def slugify(name: str) -> str:
     """Two receipts spell the same thing differently ("Milk, Whole 1 Gal" and
     "WHOLE MILK 1GAL"). Both must land on ONE shelf item, or the forecast sees
-    two items bought once each instead of one bought twice, and never learns
-    an interval."""
+    two items bought once each and never learns a rate.
+
+    But only the same THING. Package size is stripped, because a gallon and a
+    half-gallon of the same milk are one product bought in two amounts and the
+    forecast handles that in `units.py`. Variants are kept: "Milk 1%" and
+    "Milk 2%" are different products, and merging their purchases makes both
+    predictions wrong.
+    """
     s = (name or "").lower()
+    # Percentages carry meaning ("2% milk") and would otherwise be destroyed by
+    # punctuation and digit stripping, taking the distinction with them.
+    s = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"\1pct", s)
+    s = _SIZE_EXPR.sub(" ", s)
     s = re.sub(r"[^a-z0-9\s]", " ", s)
-    # Digits go BEFORE the word list, so "1gal" becomes "gal" and is then
-    # recognised as packaging. Stripping words first leaves "1gal" intact and
-    # the two spellings never meet.
-    s = re.sub(r"\d+", " ", s)
-    s = _NOISE_WORDS.sub(" ", s)
-    tokens = sorted(set(s.split()))
+    s = _PACKAGING.sub(" ", s)
+    s = _MERCHANDISING.sub(" ", s)
+    # Any bare number left is a size or a lot code, never a name.
+    s = re.sub(r"\b\d+(?:\.\d+)?\b", " ", s)
+    tokens = sorted(set(t for t in s.split() if t))
     return " ".join(tokens)[:120] or re.sub(r"\s+", " ", (name or "").lower()).strip()[:120]
 
 
@@ -82,19 +105,30 @@ def upsert_item(db: Session, *, user_id: str, name: str, category: str = "",
 def record_purchase(db: Session, *, user_id: str, item: GroceryItem,
                     purchased_at: datetime, quantity: float = 1.0,
                     source: str = "manual", source_ref: str = "",
-                    merchant: str = "", unit_price_cents: int | None = None
-                    ) -> GroceryPurchase | None:
+                    merchant: str = "", unit_price_cents: int | None = None,
+                    size_text: str = "") -> GroceryPurchase | None:
     """Idempotent per (source, source_ref, item): re-reading a receipt is not
-    a second shopping trip. Returns None when it was already known."""
+    a second shopping trip. Returns None when it was already known.
+
+    `size_text` is the package size as the receipt wrote it ("1 gal", "500g");
+    it is normalised here so the forecast can compare purchases of different
+    sizes. Import order does not matter: a receipt older than the person's own
+    "I'm out" never revives the item — only shopping done SINCE the correction
+    does. Backfilling last quarter's receipts must not tell someone they have
+    milk they threw away this morning.
+    """
     existing = db.scalar(select(GroceryPurchase).where(
         GroceryPurchase.user_id == user_id, GroceryPurchase.item_id == item.id,
         GroceryPurchase.source == source, GroceryPurchase.source_ref == (source_ref or "")))
     if existing is not None:
         return None
     when = purchased_at if purchased_at.tzinfo else purchased_at.replace(tzinfo=timezone.utc)
+    parsed = parse_size(size_text or item.size or "")
     row = GroceryPurchase(user_id=user_id, item_id=item.id, source=source,
                           source_ref=(source_ref or "")[:120], merchant=merchant[:80],
                           quantity=float(quantity or 1), unit_price_cents=unit_price_cents,
+                          pack_amount=(parsed[0] if parsed else None),
+                          pack_unit=(parsed[1] if parsed else ""),
                           purchased_at=when)
     db.add(row)
     last = item.last_purchased_at
@@ -102,19 +136,26 @@ def record_purchase(db: Session, *, user_id: str, item: GroceryItem,
         last = last.replace(tzinfo=timezone.utc)
     if last is None or when > last:
         item.last_purchased_at = when
-    # Buying it settles the question of whether they have any.
-    item.declared_out_at = None
-    item.on_list = False
+    # Buying it settles the question — but only if the buying came AFTER the
+    # person said they were out. An imported old receipt is news about the
+    # past, not evidence about the cupboard right now.
+    declared = item.declared_out_at
+    if declared is not None and declared.tzinfo is None:
+        declared = declared.replace(tzinfo=timezone.utc)
+    if declared is None or when > declared:
+        item.declared_out_at = None
+        item.on_list = False
     item.updated_at = utcnow()
     db.flush()
     return row
 
 
-def purchases_for(db: Session, user_id: str, item_id: str) -> list[tuple[datetime, float]]:
+def purchases_for(db: Session, user_id: str, item_id: str) -> list[Bought]:
     rows = db.scalars(select(GroceryPurchase).where(
         GroceryPurchase.user_id == user_id, GroceryPurchase.item_id == item_id)
         .order_by(GroceryPurchase.purchased_at)).all()
-    return [(p.purchased_at, p.quantity) for p in rows]
+    return [Bought(at=p.purchased_at, quantity=p.quantity,
+                   pack_amount=p.pack_amount, pack_unit=p.pack_unit or "") for p in rows]
 
 
 def item_state(db: Session, user_id: str, item: GroceryItem, now=None) -> dict:

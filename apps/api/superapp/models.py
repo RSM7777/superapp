@@ -432,6 +432,10 @@ class GroceryItem(Base):
     size: Mapped[str] = mapped_column(String(40), default="")        # "1 gal", "500g"
     unit: Mapped[str] = mapped_column(String(24), default="")
     image_ref: Mapped[str] = mapped_column(String(200), default="")
+    # Resolved once against a store's catalogue so a handoff basket contains the
+    # exact product this household buys, not a search engine's guess at the name.
+    product_ref: Mapped[str] = mapped_column(String(64), default="")   # UPC or product id
+    product_ref_kind: Mapped[str] = mapped_column(String(12), default="")  # upc | id
     on_list: Mapped[bool] = mapped_column(Boolean, default=False)
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)     # always keep stocked
     declared_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -461,7 +465,12 @@ class GroceryPurchase(Base):
     source: Mapped[str] = mapped_column(String(16), default="manual")  # email|platform|manual
     source_ref: Mapped[str] = mapped_column(String(120), default="")   # receipt/order id
     merchant: Mapped[str] = mapped_column(String(80), default="")
-    quantity: Mapped[float] = mapped_column(Float, default=1.0)
+    quantity: Mapped[float] = mapped_column(Float, default=1.0)     # packages bought
+    # The size of ONE package, normalised (ml | g | ct). Without it, buying a
+    # half-gallon instead of a gallon looks like the same purchase and the
+    # household appears to slow down.
+    pack_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pack_unit: Mapped[str] = mapped_column(String(8), default="")
     unit_price_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     purchased_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

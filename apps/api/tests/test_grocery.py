@@ -36,16 +36,68 @@ def test_repeat_purchases_beat_the_category_guess():
     assert cold.basis == "assumed" and cold.status == "stocked"
 
 
-def test_buying_two_does_not_teach_a_slower_household():
-    """Buying two cartons at once means that trip lasted twice as long, not
-    that they drink half as much. Without normalising by quantity a single
-    bulk buy poisons the interval for good."""
-    from superapp.grocery.predict import intervals
+def test_bulk_buying_is_counted_on_both_sides():
+    """The bug the review caught, pinned.
 
-    d0 = NOW - timedelta(days=20)
-    d1 = NOW - timedelta(days=6)          # 14 days later, but 2 units were bought
-    assert intervals([(d0, 2), (d1, 1)]) == [7.0]
-    assert intervals([(d0, 1), (d1, 1)]) == [14.0]
+    The first version divided each gap by how much was bought (right: two
+    cartons last twice as long) and then predicted from the interval alone,
+    ignoring how much the LAST purchase held. Two cartons of a seven-day milk
+    bought eight days ago came out "out", when its own arithmetic said six days
+    left. Quantity has to appear in the learning AND the prediction.
+    """
+    from superapp.grocery.predict import forecast
+
+    weekly = [(NOW - timedelta(days=22), 1), (NOW - timedelta(days=15), 1)]
+
+    two = forecast(purchases=weekly + [(NOW - timedelta(days=8), 2)],
+                   category="Dairy & Protein", now=NOW)
+    assert two.status == "stocked"
+    assert 5.5 <= two.days_left <= 6.5, "two cartons at 7 days each, 8 days in"
+
+    one = forecast(purchases=weekly + [(NOW - timedelta(days=8), 1)],
+                   category="Dairy & Protein", now=NOW)
+    assert one.status == "out", "one carton on the same history is genuinely overdue"
+
+
+def test_a_smaller_package_runs_out_sooner():
+    """Buying an 8 oz carton instead of the usual gallon is not the same
+    purchase. Throwing the size away made the household look like it had
+    slowed down."""
+    from superapp.grocery.predict import forecast
+
+    usual = [(NOW - timedelta(days=21), 1, "1 gal"), (NOW - timedelta(days=14), 1, "1 gal")]
+    small = forecast(purchases=usual + [(NOW - timedelta(days=2), 1, "8 floz")],
+                     category="Dairy & Protein", now=NOW)
+    big = forecast(purchases=usual + [(NOW - timedelta(days=2), 1, "1 gal")],
+                   category="Dairy & Protein", now=NOW)
+    assert small.days_left < big.days_left
+    assert small.status in ("out", "running_low") and big.status == "stocked"
+
+
+def test_the_same_size_written_three_ways_is_one_size():
+    """A gallon, 128 fl oz and 3.78 L are the same milk. A shelf that cannot
+    see that concludes consumption changed when only the label did."""
+    from superapp.grocery.units import parse_size
+
+    gal = parse_size("1 Gal")[0]
+    floz = parse_size("128 fl oz")[0]
+    litres = parse_size("3.78 L")[0]
+    assert abs(gal - floz) / gal < 0.01
+    assert abs(gal - litres) / gal < 0.01
+    assert parse_size("500g") == (500.0, "g")
+    assert parse_size("12 ct") == (12.0, "ct")
+    assert parse_size("Whole Milk") is None
+
+
+def test_mixed_units_fall_back_to_counting_packages():
+    """Millilitres and grams cannot be compared. Coarser and honest beats
+    precise and wrong."""
+    from superapp.grocery.predict import consumption_rate
+
+    mixed = [(NOW - timedelta(days=14), 1, "1 gal"), (NOW - timedelta(days=7), 1, "500 g")]
+    rate, basis, unit = consumption_rate(mixed)
+    assert unit == "pack", "no comparison is meaningful, so packages are counted"
+    assert basis == "estimated" and rate is not None
 
 
 def test_the_person_outranks_the_prediction():
@@ -65,15 +117,15 @@ def test_the_person_outranks_the_prediction():
 def test_forecast_never_returns_an_absurd_shelf_life():
     """Two purchases minutes apart would otherwise imply a supply of hours,
     and every item would live permanently on the red shelf."""
-    from superapp.grocery.predict import MAX_DAYS, MIN_DAYS, days_supply
+    from superapp.grocery.predict import MAX_DAYS, MIN_DAYS, forecast
 
-    frantic = [(NOW - timedelta(minutes=30), 1), (NOW, 1)]
-    supply, _ = days_supply(frantic, "Snacks")
-    assert supply >= MIN_DAYS
+    frantic = forecast(purchases=[(NOW - timedelta(minutes=30), 1), (NOW, 1)],
+                       category="Snacks", now=NOW)
+    assert MIN_DAYS <= frantic.days_supply <= MAX_DAYS
 
-    glacial = [(NOW - timedelta(days=4000), 1), (NOW, 1)]
-    supply, _ = days_supply(glacial, "Grains")
-    assert supply <= MAX_DAYS
+    glacial = forecast(purchases=[(NOW - timedelta(days=4000), 1), (NOW, 1)],
+                       category="Grains", now=NOW)
+    assert MIN_DAYS <= glacial.days_supply <= MAX_DAYS
 
 
 # --- the shelf -------------------------------------------------------------
@@ -228,24 +280,96 @@ def test_money_is_tier_three_and_has_no_autonomous_path():
     assert assess("grocery.build_basket", provenance="system").allowed is True
 
 
-def test_linked_platforms_never_advertise_ordering_they_cannot_do():
-    """Neither Walmart nor Instacart exposes a consumer ordering API a third
-    party can call. The API must not imply otherwise, or the UI will draw a
-    button that spends nothing and disappoints someone."""
-    client.post("/v1/grocery/platforms/link", headers=AUTH,
-                json={"platform": "walmart", "account_label": "rohit@example.com"})
-    rows = {p["platform"]: p for p in client.get("/v1/grocery/platforms",
-                                                 headers=AUTH).json()["platforms"]}
-    assert rows["walmart"]["linked"] is True
-    assert all(p["can_order"] is False for p in rows.values())
+def test_connection_status_reports_capability_not_a_stored_boolean():
+    """The first version let /link write status="linked" with no authentication
+    behind it, so the screen claimed a connection that did not exist — the exact
+    failure the seam was built to prevent, in the module that quotes the rule.
 
-    from superapp.grocery.base import StoreUnsupported
+    Status is now the result of trying to build the client, and it says what
+    each platform can actually do.
+    """
+    r = client.post("/v1/grocery/platforms/link", headers=AUTH,
+                    json={"platform": "walmart", "account_label": "rohit@example.com"})
+    assert r.status_code == 200
+    assert r.json()["available"] is False, "a preference is not a connection"
+    assert "Impact Radius" in r.json()["unavailable_reason"]
+
+    body = client.get("/v1/grocery/platforms", headers=AUTH).json()
+    rows = {p["platform"]: p for p in body["platforms"]}
+    assert "linked" not in rows["walmart"], "the misleading flag is gone"
+    assert rows["walmart"]["available"] is False
+    assert rows["list"]["available"] is True
+
+    # And the screen must say where the shelf really comes from, or someone
+    # will believe Nano reads their Instacart account and never forward the
+    # receipts it actually needs.
+    assert all(p["can_read_history"] is False for p in body["platforms"])
+    assert body["history_source"]["kind"] == "email_receipts"
+
+
+def test_instacart_handoff_is_unavailable_without_a_key_and_says_so():
+    """No key configured must read as "not set up", never as a broken link or
+    a silently empty basket."""
+    from superapp.grocery.base import StoreNotConnected
     from superapp.grocery.factory import client_for
+
     db = SessionLocal()
-    store = client_for(db, "harshith", "walmart")
+    with pytest.raises(StoreNotConnected) as exc:
+        client_for(db, "harshith", "instacart")
+    assert "API key" in str(exc.value)
+    db.close()
+
+
+def test_instacart_handoff_pins_the_exact_product_and_returns_a_link(monkeypatch):
+    """The reason receipts matter: a recipe app sends "milk" and hopes; we send
+    the UPC off this household's own receipt."""
+    import superapp.grocery.providers as providers
+    from superapp.grocery.base import OrderLine
+    from superapp.grocery.providers import InstacartStore
+
+    sent = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"products_link_url": "https://instacart.com/store/list/abc"}
+
+    def fake_post(url, json=None, timeout=None, headers=None):
+        sent["url"], sent["payload"] = url, json
+        return _Resp()
+
+    monkeypatch.setattr(providers.httpx, "post", fake_post)
+    store = InstacartStore(api_key="test-key")
+    out = store.handoff([
+        OrderLine(item_id="1", name="Whole Milk", quantity=2,
+                  product_ref="0001234500012", product_ref_kind="upc"),
+        OrderLine(item_id="2", name="Bananas", quantity=1),
+    ])
+    assert out["url"].startswith("https://instacart.com/")
+    items = sent["payload"]["line_items"]
+    assert items[0]["upcs"] == ["0001234500012"], "pinned to the exact product"
+    assert items[0]["quantity"] == 2
+    assert "upcs" not in items[1], "no identifier invented for an unknown product"
+
+    # Handing over a basket is not checking out, and must not claim to be.
+    from superapp.grocery.base import StoreUnsupported
     with pytest.raises(StoreUnsupported):
         store.place_order([])
-    db.close()
+
+
+def test_a_handoff_failure_is_loud_rather_than_an_empty_basket(monkeypatch):
+    """A silent failure would leave the person believing a basket is waiting."""
+    import httpx
+
+    import superapp.grocery.providers as providers
+    from superapp.grocery.base import OrderLine, StoreNotConnected
+    from superapp.grocery.providers import InstacartStore
+
+    def down(*a, **k):
+        raise httpx.ConnectError("instacart down")
+
+    monkeypatch.setattr(providers.httpx, "post", down)
+    with pytest.raises(StoreNotConnected):
+        InstacartStore(api_key="k").handoff([OrderLine(item_id="1", name="Milk")])
 
 
 def test_an_unlinked_platform_raises_rather_than_falling_back_to_the_list():
@@ -294,3 +418,124 @@ def test_empty_shelf_offers_the_receipt_path_not_a_catalogue():
                     if b.type == "text")
     assert "receipts" in text.lower()
     db.close()
+
+
+def test_variants_stay_apart_while_package_sizes_merge():
+    """Two different rules, and getting either backwards corrupts estimates.
+
+    "Milk 1%" and "Milk 2%" are different products; merging their purchases
+    makes both predictions wrong. "Milk 8 oz" and "Milk 1 Gal" are the SAME
+    product in two amounts, and the size belongs in the arithmetic, not in the
+    identity.
+    """
+    from superapp.substrate.grocery import slugify
+
+    assert slugify("Milk 1%") != slugify("Milk 2%")
+    assert slugify("Whole Milk") != slugify("Oat Milk")
+    assert slugify("Organic Carrots 2 lb") != slugify("Carrots")
+
+    assert slugify("Milk 8 oz") == slugify("Milk 1 Gal")
+    assert slugify("Milk, Whole 1 Gal") == slugify("WHOLE MILK 1GAL")
+    assert slugify("Great Value 2% Milk 1 gal") == slugify("2% Milk")
+
+
+def test_an_old_receipt_never_overrides_todays_correction():
+    """Backfilling last quarter's receipts must not tell someone they have milk
+    they threw out this morning. Only shopping done SINCE the correction
+    clears it."""
+    from superapp.substrate.grocery import (item_state, record_purchase,
+                                            set_declared_out, upsert_item)
+
+    db = SessionLocal()
+    uid = "g-stale"
+    milk = upsert_item(db, user_id=uid, name="Milk", category="Dairy & Protein")
+    record_purchase(db, user_id=uid, item=milk, purchased_at=NOW - timedelta(days=2),
+                    source="email", source_ref="recent")
+    set_declared_out(db, user_id=uid, item_id=milk.id, out=True)
+    db.commit()
+    assert item_state(db, uid, milk)["status"] == "out"
+
+    # An import turns up a receipt from three months ago.
+    record_purchase(db, user_id=uid, item=milk, purchased_at=NOW - timedelta(days=90),
+                    source="email", source_ref="ancient")
+    db.commit()
+    db.refresh(milk)
+    assert milk.declared_out_at is not None, "old news cannot restock a cupboard"
+    assert item_state(db, uid, milk)["status"] == "out"
+
+    # Actually shopping since the correction does clear it.
+    from superapp.models import utcnow
+    record_purchase(db, user_id=uid, item=milk, purchased_at=utcnow(),
+                    source="manual", source_ref="today")
+    db.commit()
+    db.refresh(milk)
+    assert milk.declared_out_at is None
+    db.close()
+
+
+def test_a_receipt_that_failed_to_parse_is_retried_not_forgotten():
+    """The first version marked every candidate read before it had an answer,
+    so one refusal or outage skipped that purchase permanently and the shelf
+    was quietly wrong forever."""
+    import json as _json
+
+    from superapp.agents.grocery import MAX_RECEIPT_ATTEMPTS, _scan_receipts
+    from superapp.agents.base import ThinkResult
+    from superapp.llm.provider import LLMProvider
+    from superapp.models import InboxMessage, utcnow
+    from superapp.substrate import append_event, get_context
+
+    uid = "g-retry"
+    db = SessionLocal()
+    db.add(InboxMessage(user_id=uid, account_email="me@example.com",
+                        gmail_msg_id="rcpt-1", thread_id="t1", from_name="Walmart",
+                        from_addr="orders@walmart.com", subject="Your Walmart order",
+                        body_text="1 Whole Milk 1 gal $3.99", tier="receipt",
+                        received_at=utcnow()))
+    db.commit()
+
+    class _R:
+        def __init__(self, text, stubbed=False, refused=False):
+            self.text, self.stubbed, self.refused = text, stubbed, refused
+
+    provider = LLMProvider()
+
+    # First scan: the model returns something unparseable.
+    provider.complete = lambda db_, **kw: _R("{not json at all")
+    result = ThinkResult()
+    context = get_context(db, agent="grocery", user_id=uid)
+    stats = _scan_receipts(db, context, provider, result)
+    assert stats["failed"] == 1 and stats["purchases"] == 0
+    kinds = [e.type for e in result.event_writes]
+    assert "grocery_receipt_failed" in kinds
+    assert "grocery_receipt_read" not in kinds, "an unanswered message is not done"
+    for e in result.event_writes:
+        append_event(db, user_id=uid, type=e.type, agent="grocery",
+                     domain=e.domain, payload=e.payload)
+    db.commit()
+
+    # Second scan: the provider is healthy. The receipt must be picked up.
+    good = {"is_grocery_receipt": True, "merchant": "Walmart", "suspicious": False,
+            "purchased_at": "2026-09-01",
+            "items": [{"name": "Whole Milk", "category": "Dairy & Protein",
+                       "brand": "", "size": "1 gal", "quantity": 1,
+                       "unit_price_cents": 399}]}
+    provider.complete = lambda db_, **kw: _R(_json.dumps(good))
+    result2 = ThinkResult()
+    stats2 = _scan_receipts(db, get_context(db, agent="grocery", user_id=uid),
+                            provider, result2)
+    assert stats2["purchases"] == 1, "the retry recovered the purchase"
+    assert "grocery_receipt_read" in [e.type for e in result2.event_writes]
+    assert MAX_RECEIPT_ATTEMPTS >= 2
+    db.close()
+
+
+def test_the_grocery_screen_is_reachable_and_voice_can_name_it():
+    """Voice returned open_screen: grocery for a screen the API did not serve,
+    and the model could not even emit that value — it was missing from the enum."""
+    from superapp.routers.voice import CONVERSE_SCHEMA
+
+    assert client.get("/v1/screen/grocery", headers=AUTH).status_code == 200
+    screens = CONVERSE_SCHEMA["properties"]["screen"]["enum"]
+    assert "grocery" in screens
+    assert "grocery_basket" in CONVERSE_SCHEMA["properties"]["action_type"]["enum"]

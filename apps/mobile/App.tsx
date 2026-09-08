@@ -69,7 +69,7 @@ Notifications.setNotificationHandler({
   }),
 });
 
-const SCREENS = ["hub", "inbox", "home", "finance", "stylist", "flights", "profile"] as const;
+const SCREENS = ["hub", "inbox", "home", "finance", "stylist", "flights", "profile", "grocery"] as const;
 type ScreenName = (typeof SCREENS)[number];
 
 // A crash must never be a black screen: show the error and offer a retry.

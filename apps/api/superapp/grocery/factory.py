@@ -6,10 +6,28 @@ from sqlalchemy.orm import Session
 
 from ..models import GroceryLink
 from ..vault import get_token
-from .base import StoreClient, StoreNotConnected
+from .base import StoreClient, StoreError, StoreNotConnected
 from .providers import InstacartStore, ListStore, WalmartStore
 
 _CLASSES = {"walmart": WalmartStore, "instacart": InstacartStore}
+
+
+def capabilities(db: Session, user_id: str) -> list[dict]:
+    """What each platform can actually do for this person, right now.
+
+    `available` is decided by trying to build the client, not by a row in a
+    table saying "linked". A status that cannot be wrong is better than one
+    that has to be kept in sync.
+    """
+    from .providers import CAPABILITIES
+    out = []
+    for key, cap in CAPABILITIES.items():
+        try:
+            client_for(db, user_id, key)
+            out.append(cap.as_dict(available=True))
+        except StoreError as exc:
+            out.append(cap.as_dict(available=False, reason=str(exc)))
+    return out
 
 
 def links(db: Session, user_id: str) -> list[GroceryLink]:
@@ -27,10 +45,10 @@ def client_for(db: Session, user_id: str, platform: str) -> StoreClient:
     cls = _CLASSES.get(platform)
     if cls is None:
         raise StoreNotConnected(f"Nano doesn't know a store called {platform!r}.")
-    row = db.scalar(select(GroceryLink).where(
-        GroceryLink.user_id == user_id, GroceryLink.platform == platform,
-        GroceryLink.status == "linked"))
-    if row is None:
-        raise StoreNotConnected(f"{platform.title()} isn't linked. Link it in settings first.")
+    if platform == "instacart":
+        # Server-wide credential: the handoff API builds a shareable basket and
+        # needs no consumer sign-in, so there is nothing per-user to link. The
+        # constructor raises when the key is absent.
+        return cls()
     raw = get_token(db, user_id=user_id, provider=f"grocery:{platform}")
-    return cls(json.loads(raw) if raw else {"linked": True})
+    return cls(json.loads(raw) if raw else None)

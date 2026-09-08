@@ -171,7 +171,7 @@ CONVERSE_SCHEMA = {
                                  "connect_site", "auto_reply_rule", "end_conversation",
                                  "next_segment", "previous_segment", "repeat_segment",
                                  "mute_mail", "priority_mail", "grocery_basket"]},
-        "screen": {"type": "string", "enum": ["hub", "inbox", "home", "finance", "stylist", "flights", ""]},
+        "screen": {"type": "string", "enum": ["hub", "inbox", "home", "finance", "stylist", "flights", "grocery", ""]},
         "draft_id": {"type": "string"},
         "message_id": {"type": "string"},
         "reply_body": {"type": "string"},
