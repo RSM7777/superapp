@@ -100,6 +100,9 @@ class StubMailClient:
     def backfill(self, n: int = 40) -> list[dict]:
         return []
 
+    def history(self, *, months: int = 24, limit: int = 1500) -> list[dict]:
+        return []   # a fake mailbox has no past worth recording
+
     # -- writing -------------------------------------------------------------
     def send_reply(self, *, to_addr: str, subject: str, body: str, thread_id: str,
                    external_id: str = "", auto: bool = False) -> str:

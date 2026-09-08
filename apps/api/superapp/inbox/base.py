@@ -78,6 +78,16 @@ class MailClient(Protocol):
         """Recent mail for a first fill, ignoring the cursor."""
         ...
 
+    def history(self, *, months: int = 24, limit: int = 1500) -> list[dict]:
+        """Past conversation for context: sent AND received, inbox and
+        archive. Deliberately NOT backfill. What backfill returns is queued,
+        triaged and drafted for; this goes to the record instead, which no
+        action path reads. That separation is what makes importing years of
+        mail safe: the import cannot reply to an old message, because the
+        reply path never looks there.
+        """
+        ...
+
     # -- writing -------------------------------------------------------------
     def send_reply(self, *, to_addr: str, subject: str, body: str, thread_id: str,
                    external_id: str = "", auto: bool = False) -> str:

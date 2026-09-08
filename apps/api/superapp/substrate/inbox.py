@@ -43,6 +43,13 @@ def insert_message(db: Session, *, user_id: str, account_email: str, msg: dict) 
         from_name=msg["from_name"], from_addr=msg["from_addr"], subject=msg["subject"],
         body_text=msg["body_text"],
         received_at=datetime.fromisoformat(msg["received_at"]),
+        # Envelope; absent from the stub mailbox and from older callers, so
+        # every one of these is optional and defaults to "we do not know".
+        to_addrs=msg.get("to_addrs", ""), cc_addrs=msg.get("cc_addrs", ""),
+        reply_to=msg.get("reply_to", ""), message_id_hdr=msg.get("message_id_hdr", ""),
+        in_reply_to=msg.get("in_reply_to", ""), list_id=msg.get("list_id", ""),
+        precedence=msg.get("precedence", ""),
+        has_list_unsubscribe=bool(msg.get("has_list_unsubscribe", False)),
     )
     db.add(row)
     db.flush()
@@ -117,6 +124,11 @@ def inbox_context(db: Session, user_id: str) -> dict:
             "box": m.account_email,
             "subject": m.subject, "gist": m.gist, "why_now": m.why_now,
             "clear_reason": m.clear_reason, "tier": m.tier, "settled": m.settled,
+            # Two questions, not one. The UI can show a high-importance card
+            # that owes nobody a reply without pretending an ask exists.
+            "importance": getattr(m, "importance", "normal") or "normal",
+            "requires_reply": bool(getattr(m, "requires_reply", False)),
+            "rule_promoted": bool(getattr(m, "rule_promoted", False)),
             "kind": getattr(m, "note_kind", "") or "",
             "flagged": bool(getattr(m, "suspicious", False)),
             "received_at": aware(m.received_at).isoformat(),
@@ -140,8 +152,15 @@ def inbox_context(db: Session, user_id: str) -> dict:
         return (rule_matches(mutes, m.from_addr, kind)
                 and not rule_matches(prio, m.from_addr, kind))
 
+    def watched(m) -> bool:
+        """Surfaced because the user asked never to miss it. It sits in Needs
+        you — that is the promise — but it carries no draft, because a rule
+        about what to SEE is not a claim that anyone is waiting on a reply."""
+        return bool(getattr(m, "rule_promoted", False)) and m.tier != "needs_reply"
+
     open_asks = [row(m) for m in msgs
-                 if m.tier == "needs_reply" and not m.settled and not muted(m)]
+                 if (m.tier == "needs_reply" or watched(m))
+                 and not m.settled and not muted(m)]
     cleared = [m for m in msgs if m.tier in ("cleared", "receipt")]
     cleared_by_reason: dict[str, int] = {}
     for m in cleared:
@@ -197,9 +216,11 @@ def inbox_context(db: Session, user_id: str) -> dict:
         "mailboxes": mailboxes,
         "needs_reply": open_asks,
         "primary": primary,
+        # Watched mail is already up in Needs you; listing it twice reads as
+        # two emails.
         "worth_knowing": [row(m) for m in msgs
                           if m.tier == "worth_knowing" and not m.settled
-                          and not muted(m)][:8],
+                          and not muted(m) and not watched(m)][:8],
         "cleared_count": len(cleared) + sum(
             1 for m in msgs
             if m.tier in ("worth_knowing", "needs_reply") and not m.settled and muted(m)),

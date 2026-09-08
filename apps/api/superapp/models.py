@@ -368,7 +368,32 @@ class InboxMessage(Base):
     subject: Mapped[str] = mapped_column(String(256), default="")
     body_text: Mapped[str] = mapped_column(Text, default="")  # plain text, truncated
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Envelope kept at ingest. Without these, "addressed to me or to four
+    # hundred people" and "is this a reply in my own thread" are unanswerable —
+    # and they are the strongest signals of what matters to THIS person.
+    to_addrs: Mapped[str] = mapped_column(Text, default="")        # comma-joined
+    cc_addrs: Mapped[str] = mapped_column(Text, default="")
+    reply_to: Mapped[str] = mapped_column(String(320), default="")
+    message_id_hdr: Mapped[str] = mapped_column(String(320), default="")
+    in_reply_to: Mapped[str] = mapped_column(String(320), default="")
+    list_id: Mapped[str] = mapped_column(String(320), default="")
+    precedence: Mapped[str] = mapped_column(String(32), default="")
+    has_list_unsubscribe: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Deterministic features computed in code from the envelope and our own
+    # history. Evidence for the model and the scoring key for evals; never
+    # invented by a model, so an email cannot fake them.
+    signals: Mapped[dict | None] = mapped_column(JSON, default=None)
     tier: Mapped[str] = mapped_column(String(16), default="pending")
+    # The tier answers one question; these answer the two that actually differ.
+    # A recall notice is important and needs no reply; a scheduling ping needs a
+    # reply and is not important. Recorded now so a labelled corpus can be
+    # written against them; `tier` stays authoritative for display and behaviour
+    # until a golden set can prove a change of that safe.
+    importance: Mapped[str] = mapped_column(String(8), default="normal")  # low | normal | high
+    requires_reply: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Extracted from email text, so attacker-influenced: order the list by it,
+    # never let it drive an action or arm a timer.
+    attention_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     gist: Mapped[str] = mapped_column(String(256), default="")  # one-line summary
     why_now: Mapped[str] = mapped_column(String(128), default="")  # urgency chip
     clear_reason: Mapped[str] = mapped_column(String(128), default="")
@@ -380,6 +405,44 @@ class InboxMessage(Base):
     verified_clear: Mapped[bool] = mapped_column(default=False)  # adversarial pass agreed
     archived: Mapped[bool] = mapped_column(default=False)  # actually archived in Gmail
     settled: Mapped[bool] = mapped_column(default=False)  # user resolved it (sent/dismissed)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MailHistory(Base):
+    """Conversation the twin deliberately does not hold: sent mail, archived
+    mail, anything older than the working set.
+
+    InboxMessage is a QUEUE — rows in it are triaged, drafted for, archived and
+    replied to. This table is a RECORD. Nothing here is ever triaged or acted
+    on; it exists so that "have I answered this person before", "what did we
+    agree in March" and "who actually matters to me" have data to read. Keeping
+    the two apart is what lets a deep import be safe: importing ten years of
+    mail cannot produce ten years of replies, because nothing downstream of the
+    queue ever looks here for work.
+    """
+
+    __tablename__ = "mail_history"
+    __table_args__ = (
+        UniqueConstraint("user_id", "gmail_msg_id", name="uq_mail_history_msg"),
+        Index("ix_mail_history_sender", "user_id", "from_addr"),
+        Index("ix_mail_history_thread", "user_id", "thread_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_email: Mapped[str] = mapped_column(String(128), default="")
+    gmail_msg_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(32), default="")
+    # 'outbound' is the half the product never had. Without the user's own
+    # replies, "unanswered" is a guess and "I always reply to Priya" is unknowable.
+    direction: Mapped[str] = mapped_column(String(8), default="inbound")
+    from_addr: Mapped[str] = mapped_column(String(320), default="")
+    to_addrs: Mapped[str] = mapped_column(Text, default="")
+    subject: Mapped[str] = mapped_column(String(256), default="")
+    body_text: Mapped[str] = mapped_column(Text, default="")
+    # When it was SENT, not when it was imported. Everything dated by import
+    # time makes a decade of history look like one very busy afternoon.
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
