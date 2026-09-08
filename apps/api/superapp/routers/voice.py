@@ -170,8 +170,8 @@ CONVERSE_SCHEMA = {
                                  "set_nutrition", "log_water", "research_task",
                                  "connect_site", "auto_reply_rule", "end_conversation",
                                  "next_segment", "previous_segment", "repeat_segment",
-                                 "mute_mail", "priority_mail"]},
-        "screen": {"type": "string", "enum": ["hub", "inbox", "home", "finance", "stylist", "flights", ""]},
+                                 "mute_mail", "priority_mail", "grocery_basket"]},
+        "screen": {"type": "string", "enum": ["hub", "inbox", "home", "finance", "stylist", "flights", "grocery", ""]},
         "draft_id": {"type": "string"},
         "message_id": {"type": "string"},
         "reply_body": {"type": "string"},
@@ -187,11 +187,16 @@ CONVERSE_SCHEMA = {
         # a guessed address), or priority_kind for a described stream.
         "priority_kind": {"type": "string"},
         "priority_sender": {"type": "string"},
+        # grocery_basket: "order more milk", "we're out of coffee", "add rice
+        # to the shop". Names of things, as the person said them — Nano
+        # matches them against the shelf. Leave empty to mean "everything
+        # that's low or out", which is what "do the shop" asks for.
+        "grocery_items": {"type": "array", "items": {"type": "string"}},
         "listen": {"type": "boolean"},
     },
     "required": ["say", "action_type", "screen", "draft_id", "message_id", "reply_body",
                  "to_addr", "subject", "profile_json", "mute_kind", "mute_sender",
-                 "priority_kind", "priority_sender", "listen"],
+                 "priority_kind", "priority_sender", "grocery_items", "listen"],
     "additionalProperties": False,
 }
 
@@ -294,7 +299,7 @@ def _inbox_for_voice(context) -> dict:
 
 def _stub_converse(user_text: str, voice_inbox: dict) -> dict:
     t = user_text.lower()
-    base = {"say": "", "action_type": "none", "screen": "", "draft_id": "",
+    base = {"grocery_items": [], "say": "", "action_type": "none", "screen": "", "draft_id": "",
             "message_id": "", "reply_body": "", "listen": False}
     asks = voice_inbox["needs_reply"]
     if any(w in t for w in ("attention", "need", "important", "read")):
@@ -405,6 +410,63 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
             return {"say": f"Done. Mail from {who} gets filed on my own judgement again."}
         return {"say": f"Done. Anything from {who} lands in Needs you from now on, with a "
                        f"reply drafted. Say \"stop flagging {who}\" if that gets to be too much."}
+
+    if action == "grocery_basket":
+        # "Order more milk", "we're out of coffee", "do the shop."
+        #
+        # Nano fills the basket and stops. Placing it is tier 3 — money and
+        # irreversible — so the spoken word builds a draft and the person
+        # confirms it on a screen where they can see exactly what they are
+        # buying. A voice channel is the worst possible place to authorise a
+        # charge: it is the easiest to mishear and the hardest to review.
+        from sqlalchemy import select
+
+        from ..agents.grocery import propose_basket
+        from ..models import GroceryItem, GroceryOrder
+        from ..substrate.grocery import slugify
+
+        names = [str(n).strip() for n in (parsed.get("grocery_items") or []) if str(n).strip()]
+        if names:
+            shelf = list(db.scalars(select(GroceryItem).where(GroceryItem.user_id == user_id)))
+            by_slug = {i.slug: i for i in shelf}
+            found, missing = [], []
+            for name in names[:20]:
+                hit = by_slug.get(slugify(name))
+                if hit is None:
+                    # A near miss beats a new duplicate item: "milk" should
+                    # find "whole milk" rather than create a second shelf row.
+                    tokens = set(slugify(name).split())
+                    hit = next((i for i in shelf if tokens and tokens <= set(i.slug.split())), None)
+                (found if hit is not None else missing).append(hit or name)
+            if not found:
+                return {"say": f"I couldn't find {', '.join(missing[:3])} on your shelf. "
+                               f"Want me to add {'them' if len(missing) > 1 else 'it'}?"}
+            order = db.scalar(select(GroceryOrder).where(
+                GroceryOrder.user_id == user_id, GroceryOrder.status == "draft"))
+            if order is None:
+                order = GroceryOrder(user_id=user_id)
+                db.add(order)
+            order.lines = [{"item_id": i.id, "name": i.name, "quantity": 1,
+                            "unit": i.unit, "note": "you asked for this"} for i in found]
+            order.reason = "you asked for these"
+            order.confirmed_by = ""      # a new basket is a new question
+            order.confirmed_at = None
+            db.flush()
+            said = ", ".join(i.name for i in found[:4])
+            tail = (f" I couldn't find {', '.join(missing[:2])}." if missing else "")
+            db.commit()
+            return {"say": f"Basket has {said}.{tail} Have a look and confirm — "
+                           f"I won't order anything until you do.",
+                    "action": "open_screen", "screen": "grocery", "acted": True}
+        order = propose_basket(db, user_id, reason="you asked me to do the shop")
+        if order is None:
+            db.commit()
+            return {"say": "Nothing's low or out right now — your shelf looks fine."}
+        db.commit()
+        n = len(order.lines or [])
+        return {"say": f"I put {n} thing{'s' if n != 1 else ''} in the basket — "
+                       f"{order.reason}. Confirm it and I'll hand it over.",
+                "action": "open_screen", "screen": "grocery", "acted": True}
 
     if action == "mute_mail":
         # "Don't show me Amazon shipping updates" / "nothing from this sender".
@@ -755,6 +817,15 @@ def converse(body: ConverseBody, user_id: str = Depends(current_user_id),
     if override.get("say"):
         parsed["say"] = override["say"]
         parsed["listen"] = True
+    # An action that has somewhere to send the person says so. This used to read
+    # only "say" and silently discard the rest, so Nano would announce a basket
+    # it had just built and leave the app sitting on the same screen. The client
+    # navigates on action == "open_screen" with a screen name; both have to
+    # survive the trip.
+    if override.get("action"):
+        parsed["action_type"] = override["action"]
+    if override.get("screen"):
+        parsed["screen"] = override["screen"]
 
     append_event(db, user_id=user_id, type="voice_command", agent="orb",
                  payload={"heard": body.messages[-1].text[:200],
@@ -770,9 +841,11 @@ def converse(body: ConverseBody, user_id: str = Depends(current_user_id),
     return {
         "say": parsed["say"], "action": parsed["action_type"],
         "screen": parsed.get("screen", ""), "listen": parsed.get("listen", False),
-        "acted": parsed["action_type"] in ("draft_reply", "send_draft", "send_new_email",
-                                           "set_nutrition", "log_water", "auto_reply_rule",
-                                           "mute_mail", "priority_mail"),
+        # An override that changed the world says so itself; overwriting
+        # action_type for navigation must not erase the fact that it acted.
+        "acted": bool(override.get("acted")) or parsed["action_type"] in (
+            "draft_reply", "send_draft", "send_new_email", "set_nutrition",
+            "log_water", "auto_reply_rule", "mute_mail", "priority_mail"),
     }
 
 

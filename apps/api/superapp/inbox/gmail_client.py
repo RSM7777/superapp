@@ -168,10 +168,9 @@ class GmailClient:
             try:
                 data = self._get("/history", **params)
             except httpx.HTTPStatusError as exc:
-                # Gmail expires old history cursors (404). After a long outage
-                # the only honest move is to reset the watermark to now.
-                if exc.response.status_code == 404 and not page:
-                    return [], str(self.profile()["historyId"])
+                if exc.response.status_code == 404:
+                    from .base import HistoryExpired
+                    raise HistoryExpired("Gmail history expired; full inbox recovery is required") from exc
                 raise
             for h in data.get("history", []):
                 ids += [m["message"]["id"] for m in h.get("messagesAdded", [])]
@@ -188,10 +187,33 @@ class GmailClient:
                 # listing and the fetch (spam purges, immediate deletes,
                 # 403-forbidden ghosts). Skip it; never let one message
                 # kill the whole sync.
-                if exc.response.status_code in (403, 404, 410):
+                if exc.response.status_code in (404, 410):
                     continue
                 raise
         return [m for m in msgs if m], new_hid
+
+    def recovery_page(self, page_token: str = "") -> tuple[list[dict], str]:
+        """One page of the current inbox. A 403 is a gap, not an empty message.
+
+        A separate history watermark is captured before this scan begins;
+        incremental catch-up from it covers arrivals during pagination.
+        Recovery deliberately has no send/archive operations.
+        """
+        params = {"labelIds": "INBOX", "maxResults": 25}
+        if page_token:
+            params["pageToken"] = page_token
+        data = self._get("/messages", **params)
+        messages = []
+        for ref in data.get("messages", []):
+            try:
+                parsed = self._parse(self._get(f"/messages/{ref['id']}", format="full"))
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (404, 410):
+                    continue  # deleted since listing; there is no content to recover
+                raise
+            if parsed:
+                messages.append(parsed)
+        return messages, data.get("nextPageToken", "")
 
     def backfill(self, n: int = 40) -> list[dict]:
         """Recent Primary-inbox mail for a first fill: plain list + fetch,

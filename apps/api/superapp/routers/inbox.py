@@ -361,12 +361,14 @@ def inbox_state(user_id: str = Depends(current_user_id), db: Session = Depends(g
     return {
         "connected": data.get("connected", False),
         "mailboxes": data.get("mailboxes", []),
+        "sync_incomplete": data.get("sync_incomplete", False),
         "reauth": reauth,
         "auto_reply_kinds": auto_kinds,
         "auto_reply_senders": auto_senders,
         "priority_kinds": list(prio_kinds),
         "priority_senders": list(prio_senders),
-        "synced_at": last_sync.created_at.isoformat() if last_sync else None,
+        "synced_at": (last_sync.created_at.isoformat()
+                      if last_sync and not data.get("sync_incomplete") else None),
         "needs_reply": data.get("needs_reply", []),
         "worth_knowing": data.get("worth_knowing", []),
         "handled_count": sum(c["count"] for c in categories),
@@ -653,8 +655,8 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
             continue  # the loop backstop: this thread has had its auto-replies today
         if not assess("inbox.auto_reply", provenance="user").allowed:
             continue
-        from ..substrate.inbox import draft_unsendable
-        if draft_unsendable(d):
+        from ..substrate.inbox import auto_reply_blocked, draft_unsendable
+        if draft_unsendable(d) or auto_reply_blocked(msg):
             continue  # a refusal, a failure, a legacy stub, or no words at all never sends
         if has_placeholder(d.body):
             continue  # a [time]-style blank is unfinished writing; the user fills it

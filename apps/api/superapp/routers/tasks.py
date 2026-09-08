@@ -291,6 +291,8 @@ def dispatch(db: Session = Depends(get_db)):
     stuck tasks, retry the retryable, queue due campaign checks."""
     out = dispatch_tick(db)
     db.commit()
+    from ..inbox.recovery import resume_recoveries
+    out["mail_recoveries_resumed"] = resume_recoveries()
     return out
 
 

@@ -37,6 +37,10 @@ class ReauthRequired(MailError):
     """The provider rejected our credential; the person must sign in again."""
 
 
+class HistoryExpired(MailError):
+    """Incremental history is gone. Retain the cursor until full recovery finishes."""
+
+
 TokenWriter = Callable[[dict], None]
 
 
@@ -79,12 +83,17 @@ class MailClient(Protocol):
         ...
 
     def history(self, *, months: int = 24, limit: int = 1500) -> list[dict]:
-        """Past conversation for context: sent AND received, inbox and
-        archive. Deliberately NOT backfill. What backfill returns is queued,
-        triaged and drafted for; this goes to the record instead, which no
-        action path reads. That separation is what makes importing years of
-        mail safe: the import cannot reply to an old message, because the
-        reply path never looks there.
+        """Past conversation for context: sent AND received, inbox and archive.
+
+        Deliberately not a bigger `backfill`. What backfill returns enters the
+        QUEUE, so it gets triaged, drafted for and possibly archived — which is
+        why it stays small and recent. What this returns goes only to
+        `mail_history`, which no action path reads. A provider that cannot
+        offer this returns an empty list; it must never return queue mail here.
+
+        Each dict carries `direction`: "outbound" for mail the user sent,
+        "inbound" for mail they received. The outbound half is the whole point
+        — without it, "have I ever replied to this person" is a guess.
         """
         ...
 

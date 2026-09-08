@@ -132,7 +132,7 @@ def sender_history(db: Session, *, user_id: str, addr: str) -> dict:
     # Recipients live in one comma-joined column, so match the WHOLE address
     # between delimiters. An unanchored substring lets "s@x.com" inherit
     # "boss@x.com"'s history, and underscores are wildcards in LIKE.
-    replied_to = func.concat(",", func.lower(MailHistory.to_addrs), ",").contains(
+    replied_to = ("," + func.lower(MailHistory.to_addrs) + ",").contains(
         f",{addr},", autoescape=True)
     inbound = db.scalar(select(func.count()).select_from(MailHistory).where(
         MailHistory.user_id == user_id, same_sender,
