@@ -70,8 +70,10 @@ class StubMailClient:
 
     provider = "stub"
 
-    def __init__(self, token: dict | None = None, on_token_refresh=None) -> None:
+    def __init__(self, token: dict | None = None, on_token_refresh=None,
+                 address: str = STUB_ADDRESS) -> None:
         self.token = token or {}
+        self._address = address or STUB_ADDRESS
 
     # -- linking -------------------------------------------------------------
     def auth_url(self, state: str) -> str:
@@ -82,12 +84,17 @@ class StubMailClient:
                 "expiry_ts": time.time() + 3600}
 
     def address(self) -> str:
-        return STUB_ADDRESS
+        return self._address
 
     # -- reading -------------------------------------------------------------
     def new_messages(self, cursor: str) -> tuple[list[dict], str]:
         if cursor:  # already filled once; the fake mailbox never grows
             return [], cursor
+        if self._address != STUB_ADDRESS:
+            # The fixture is THE demo mailbox. A second offline mailbox is a
+            # placeholder for hand-made rows, and must not deal the same
+            # messages a second time under a different address.
+            return [], "1000"
         return stub_mailbox(), "1000"
 
     def backfill(self, n: int = 40) -> list[dict]:

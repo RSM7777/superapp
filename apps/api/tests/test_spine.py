@@ -2097,6 +2097,9 @@ def _sync_delegated_sender(uid):
     config_module.get_settings().gmail_scope_tier = "send"
     autosend.TIMERS_ENABLED = False
     db = SessionLocal()
+    # The offline mailbox is a provider now, not a global mode: without this
+    # the row is a Gmail account with no credential, which the factory
+    # correctly refuses, and the sync produces nothing to assert on.
     upsert_account(db, user_id=uid, email="stub@example.com", provider="stub")
     for i in range(15):   # enough known mail that the sync is not treated as a backfill
         db.add(InboxMessage(user_id=uid, account_email="stub@example.com",
@@ -2269,12 +2272,12 @@ def test_production_refuses_a_stub_brain():
 
 
 
-def _intercept_sends(monkeypatch):
-    """Record every send instead of letting one leave.
+def _intercept_gmail(monkeypatch):
+    """Record every send instead of reaching a provider.
 
-    Patches BOTH providers. Which one a message uses is now a property of its
-    account, and these tests care that the words never went out — not which
-    client would have carried them.
+    Sending goes through the provider seam now, so which client a mailbox
+    uses depends on its `provider` column. Patch both, or a stub mailbox
+    sends through StubMailClient and the recorder stays empty.
     """
     from superapp.inbox.gmail_client import GmailClient
     from superapp.inbox.stub_client import StubMailClient
@@ -2283,12 +2286,10 @@ def _intercept_sends(monkeypatch):
     def fake(self, *, to_addr, subject, body, thread_id, external_id="", auto=False):
         calls.append({"to": to_addr, "body": body, "auto": auto})
         return f"sent-{len(calls)}"
-    for cls in (GmailClient, StubMailClient):
-        monkeypatch.setattr(cls, "send_reply", fake)
+    monkeypatch.setattr(GmailClient, "send_reply", fake)
+    monkeypatch.setattr(StubMailClient, "send_reply", fake)
     return calls
 
-
-_intercept_gmail = _intercept_sends   # the name these tests were written under
 
 
 def _needs_reply(db, uid, gmail_msg_id, kind="recruiter pings"):
@@ -2802,17 +2803,27 @@ def test_stub_mailbox_is_a_provider_not_a_global_mode():
     """Being offline is a property of the ACCOUNT now. A stub mailbox still
     works end to end, and its sends are recorded rather than invented."""
     from superapp.inbox.factory import client_for
-    from superapp.inbox.stub_client import SENT, StubMailClient
+    from superapp.inbox.stub_client import SENT, STUB_ADDRESS, StubMailClient
     from superapp.substrate.inbox import upsert_account
 
     db = SessionLocal()
-    acct = upsert_account(db, user_id="harshith", email="h@x.com", provider="stub")
+    acct = upsert_account(db, user_id="stub-provider-tester", email=STUB_ADDRESS,
+                          provider="stub")
     db.commit()
-    c = client_for(db, "harshith", acct)
+    c = client_for(db, "stub-provider-tester", acct)
     assert isinstance(c, StubMailClient) and c.provider == "stub"
     msgs, cursor = c.new_messages("")
     assert msgs and cursor and all("gmail_msg_id" in m for m in msgs)
     assert c.new_messages(cursor) == ([], cursor)   # the fake mailbox never grows
+
+    # A SECOND offline mailbox is a placeholder for hand-made rows, not another
+    # copy of the demo fixture. Dealing the same messages under a second
+    # address would let two mailboxes race for the same ids, and whichever
+    # synced first would own mail the other was supposed to hold.
+    other = upsert_account(db, user_id="stub-provider-tester", email="h@x.com",
+                           provider="stub")
+    db.commit()
+    assert client_for(db, "stub-provider-tester", other).new_messages("") == ([], "1000")
     before = len(SENT)
     sent_id = c.send_reply(to_addr="a@b.example", subject="hi", body="there",
                            thread_id="t", external_id="x", auto=True)
@@ -2878,3 +2889,9 @@ def test_a_broken_mailbox_keeps_its_alarm_when_another_is_healthy():
     db.commit()
     assert flag_state().get("needed") is False
     db.close()
+
+# ---------------------------------------------------------------------------
+# Draft generation is a result, not a string. Only a finished draft can ever
+# send itself; a refusal, a failed call, a blank, or no model at all waits
+# for the person. These pin the hole where a model refusal auto-sent as "yes".
+
