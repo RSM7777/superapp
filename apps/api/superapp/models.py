@@ -404,6 +404,12 @@ class InboxDraft(Base):
     # mid-send) is measured from here, never from the deadline.
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # How the body came to be — separate from `status`, which is about delivery.
+    # Only a `ready` draft may ever send itself. A refusal, a failed call, or a
+    # draft still missing information sits in the inbox for the person to
+    # finish; it is never auto-scheduled and send_due holds it at the deadline.
+    generation_status: Mapped[str] = mapped_column(String(16), default="ready")  # ready | needs_input | failed | refused
+    generation_reason: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

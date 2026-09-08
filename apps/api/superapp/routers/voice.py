@@ -349,7 +349,8 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
                 append_event(db, user_id=user_id, type="draft_edited", agent="orb", domain="inbox",
                              payload={"draft_id": draft.id, "before": draft.body[:2000],
                                       "after": parsed["reply_body"][:2000], "via": "voice"})
-                draft.body = parsed["reply_body"]
+                from ..substrate.inbox import mark_written_by_user
+                mark_written_by_user(draft, parsed["reply_body"])   # spoken words are ready by definition
                 draft.edited_at = utcnow()
                 if draft.status != "auto_pending":   # an edit inside the window keeps it
                     draft.status = "edited"
@@ -648,6 +649,9 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
             return {"say": "That one already went out."}
         if draft.status == "auto_sending":
             return {"say": "That one is already on its way."}
+        from ..substrate.inbox import draft_unsendable
+        if draft_unsendable(draft):
+            return {"say": "That one was never written — tell me what to say and I'll draft it."}
         was_edited = draft.status == "edited" or draft.edited_at is not None
         was_auto = draft.status == "auto_pending"
         if was_auto:

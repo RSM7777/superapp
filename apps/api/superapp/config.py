@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # LLM provider. When no key is set the provider runs in deterministic stub mode
     # so the spine works fully offline.
     anthropic_api_key: str = ""
+    # Production must not run on canned model output. With this false and no key
+    # set, the server refuses to start rather than triage mail by heuristic and
+    # hand out drafts nobody wrote. Dev instances and tests leave it true.
+    allow_stub_llm: bool = True
     # Model-per-task routing (architecture §5: big model for cognition, small for routing).
     # Downgrade a task only when cost events + the golden set prove it doesn't hurt.
     model_default: str = "claude-opus-5"
@@ -125,3 +129,13 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def assert_llm_configured(settings: "Settings") -> None:
+    """Refuse to serve real mail on a stub brain. Called once at startup."""
+    if not settings.allow_stub_llm and not settings.anthropic_api_key:
+        raise RuntimeError(
+            "SUPERAPP_ANTHROPIC_API_KEY is not set and SUPERAPP_ALLOW_STUB_LLM is false: "
+            "refusing to start on canned model output. Set the key, or allow stub mode "
+            "explicitly for a dev instance."
+        )

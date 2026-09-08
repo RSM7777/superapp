@@ -17,6 +17,9 @@ sendable on tap; modify = cleared tier actually archived. Nothing ever sends
 without an explicit user tap on a draft.
 """
 import json
+from typing import Literal
+
+from pydantic import BaseModel
 from datetime import datetime, timezone
 
 import httpx
@@ -207,7 +210,18 @@ def _verify_clear(db: Session, context: ContextSlice, provider: LLMProvider, msg
         return False  # verifier unparseable -> keep the email visible
 
 
-def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg) -> str:
+class DraftResult(BaseModel):
+    """What came back from asking the model to write a reply. Only a `ready`
+    draft may ever send itself. A refusal, a failed call, or a draft that is
+    still missing information waits for the person to finish it. The old
+    behaviour — inventing a cheerful "yes from my side" whenever the model
+    refused or was absent — meant a refusal could auto-send as consent."""
+    status: Literal["ready", "needs_input", "failed", "refused"]
+    body: str | None = None
+    reason: str | None = None
+
+
+def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg) -> DraftResult:
     from ..substrate.facts import read_facts as _read_facts
 
     from ..policy import has_placeholder, neutralize_placeholders
@@ -230,15 +244,20 @@ def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg)
                       for f in _read_facts(db, user_id=context.user_id,
                                            domains=["playbooks"], limit=6)],
     }
-    resp = provider.complete(
-        db, user_id=context.user_id, agent="inbox", task="reply_draft",
-        system=DRAFT_SYSTEM, prompt=json.dumps(payload, sort_keys=True),
-    )
-    if resp.stubbed or resp.refused:
-        first = msg.from_name.split()[0] if msg.from_name else "there"
-        return (f"Hi {first} — got it, thanks for the nudge. Yes from my side; "
-                f"I'll confirm the details by tomorrow. (stub draft)")
+    try:
+        resp = provider.complete(
+            db, user_id=context.user_id, agent="inbox", task="reply_draft",
+            system=DRAFT_SYSTEM, prompt=json.dumps(payload, sort_keys=True),
+        )
+    except Exception as e:  # noqa: BLE001 — an outage is a failed draft, never an invented one
+        return DraftResult(status="failed", reason=f"model call failed: {type(e).__name__}")
+    if resp.stubbed:
+        return DraftResult(status="failed", reason="no model configured")
+    if resp.refused:
+        return DraftResult(status="refused", reason="the model declined to write this reply")
     text = resp.text.strip()
+    if not text:
+        return DraftResult(status="failed", reason="the model returned nothing")
     if has_placeholder(text):
         # One rewrite with the blank called out; if it still slips through,
         # the draft waits for the user and the auto-send gate refuses it.
@@ -246,13 +265,19 @@ def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg)
         payload["fix"] = ("Your previous draft left a fill-in blank (like [time]). "
                           "Rewrite it so nothing needs filling in: ask for the "
                           "missing detail in plain words instead.")
-        again = provider.complete(
-            db, user_id=context.user_id, agent="inbox", task="reply_draft",
-            system=DRAFT_SYSTEM, prompt=json.dumps(payload, sort_keys=True),
-        )
+        try:
+            again = provider.complete(
+                db, user_id=context.user_id, agent="inbox", task="reply_draft",
+                system=DRAFT_SYSTEM, prompt=json.dumps(payload, sort_keys=True),
+            )
+        except Exception as e:  # noqa: BLE001
+            return DraftResult(status="needs_input", body=text,
+                               reason=f"draft still has a blank; rewrite failed: {type(e).__name__}")
         if not (again.stubbed or again.refused) and again.text.strip():
             text = again.text.strip()
-    return text
+        if has_placeholder(text):
+            return DraftResult(status="needs_input", body=text, reason="draft still has a blank")
+    return DraftResult(status="ready", body=text)
 
 
 def _auto_reply_match(db: Session, user_id: str, kind: str,
@@ -421,17 +446,22 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                 else:
                     msg.tier = "worth_knowing"  # verifier veto: stay visible
             if msg.tier == "needs_reply":
+                written = _draft_reply(db, context, provider, msg)
                 draft = create_draft(db, user_id=context.user_id, message_id=msg.id,
-                                     body=_draft_reply(db, context, provider, msg))
+                                     body=written.body or "",
+                                     generation_status=written.status,
+                                     generation_reason=written.reason or "")
                 # Auto-reply: a kind the user explicitly delegated sends
                 # itself; the exchange surfaces under Worth knowing — what
                 # came in and what went out — never silently.
+                from ..substrate.inbox import draft_unsendable as _unsendable
                 gate = assess("inbox.auto_reply", provenance="email",
                               suspicious=msg.suspicious)
                 if (msg.gmail_msg_id not in backfill_ids
                         and settings.gmail_scope_tier in ("send", "modify")
                         and _auto_reply_match(db, context.user_id, msg.note_kind, msg.from_addr)
                         and gate.allowed
+                        and _unsendable(draft) is None  # a refusal, a failure or a blank never sends itself
                         and not promoted  # a rule surfaced it; the model saw no ask to answer
                         and not raw.get("auto_submitted")  # never answer an auto-reply
                         and replies_sent_in_thread(db, user_id=context.user_id,
@@ -569,8 +599,16 @@ def inbox_render(context: ContextSlice) -> Screen:
             why_bits.append(a["gist"].rstrip("."))
         if prior:
             why_bits.append(f"{prior + 1} emails from this sender lately")
-        why_detail = (". ".join(why_bits) + ". Drafted from the thread in your voice — "
-                      "nothing sends until you say so.")
+        if d.get("generation", "ready") == "ready":
+            why_detail = (". ".join(why_bits) + ". Drafted from the thread in your voice — "
+                          "nothing sends until you say so.")
+        else:
+            # The card is honest about an unwritten draft. The old drafter
+            # invented a cheerful yes here; now the person writes it, and the
+            # empty body can never send itself.
+            reason = d.get("generation_reason") or "the model didn't finish"
+            why_detail = (". ".join(why_bits) + f". Nano couldn't write this one ({reason}). "
+                          "Tap to write it yourself — nothing sends until you say so.")
         ask_blocks.append(DraftCard(
             id=d.get("id", a["id"]), agent="inbox", from_name=a["from_name"],
             subject=a["subject"], why=a["why_now"] or a["gist"],

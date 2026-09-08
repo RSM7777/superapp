@@ -24,6 +24,7 @@ services:
     env_file: ../.env
     environment:
       SUPERAPP_DATABASE_URL: postgresql+psycopg2://superapp:${SUPERAPP_DB_PASSWORD}@db:5432/superapp
+      SUPERAPP_ALLOW_STUB_LLM: "false"   # never triage real mail on canned output
     volumes:
       - media:/app/media
       # APNs signing key lives on the host, read-only in the container.

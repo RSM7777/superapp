@@ -66,7 +66,7 @@ def client_for(db: Session, user_id: str, acct: GmailAccount) -> MailClient:
     """
     provider = provider_of(acct)
     if provider == "stub":
-        return StubMailClient()
+        return StubMailClient(address=acct.email)
 
     raw = get_token(db, user_id=user_id, provider=vault_key(acct))
     if not raw:
