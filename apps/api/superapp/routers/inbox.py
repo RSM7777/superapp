@@ -407,8 +407,24 @@ def _run_history_import(user_id: str, months: int, limit: int) -> None:
 
     db = SessionLocal()
     try:
+        # One import per person at a time. Two overlapping runs fight over the
+        # same message ids, and the loser dies on a uniqueness violation after
+        # doing all the work. The lock is held for this transaction only, so a
+        # crash can never wedge someone out of importing again.
+        if db.get_bind().dialect.name == "postgresql":
+            from sqlalchemy import text as _text
+            got = db.execute(_text("SELECT pg_try_advisory_xact_lock(hashtext(:k))"),
+                             {"k": f"history_import:{user_id}"}).scalar()
+            if not got:
+                append_event(db, user_id=user_id, type="history_import_skipped",
+                             agent="inbox", domain="inbox",
+                             payload={"why": "an import is already running"})
+                db.commit()
+                return
+
         provider = LLMProvider()
         total = {"seen": 0, "recorded": 0, "chunks": 0, "people": 0}
+        failed: list[str] = []
         from ..inbox.base import MailError
         from ..inbox.factory import client_for
         for acct in _accounts(db, user_id):
@@ -416,14 +432,30 @@ def _run_history_import(user_id: str, months: int, limit: int) -> None:
                 client = client_for(db, user_id, acct)
             except MailError:
                 continue   # a disconnected mailbox has nothing to import
-            msgs = client.history(months=months, limit=limit)
-            stats = import_history(db, user_id=user_id, account_email=acct.email,
-                                   messages=msgs, provider=provider)
+            try:
+                msgs = client.history(months=months, limit=limit)
+                stats = import_history(db, user_id=user_id, account_email=acct.email,
+                                       messages=msgs, provider=provider)
+            except Exception as exc:  # noqa: BLE001
+                # One unreachable mailbox must not discard the mail already
+                # recorded from the others. Keep what worked, say what didn't.
+                db.rollback()
+                failed.append(acct.email)
+                append_event(db, user_id=user_id, type="history_import_failed",
+                             agent="inbox", domain="inbox",
+                             payload={"account": acct.email, "error": type(exc).__name__})
+                db.commit()
+                continue
             for k in total:
                 total[k] += stats.get(k, 0)
+            db.commit()   # each mailbox's work is durable on its own
         append_event(db, user_id=user_id, type="history_imported", agent="inbox",
-                     domain="inbox", payload={**total, "months": months})
+                     domain="inbox", payload={**total, "months": months,
+                                              "failed_accounts": failed})
         db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -611,8 +643,11 @@ def send_matching_pending_drafts(db: Session, user_id: str, *,
             continue
         if getattr(msg, "suspicious", False):
             continue  # a steering email never auto-sends, even on an explicit rule
-        if getattr(msg, "rule_promoted", False):
-            continue  # a "never miss" rule surfaced it; the model saw no ask to answer
+        # NOTE: no rule_promoted check here. It now means "a never-miss rule
+        # matched", not "the rule invented the ask". This path only ever sees
+        # tier == needs_reply, which is the model's own judgement that someone
+        # is waiting, and the person has explicitly asked to auto-reply to
+        # this sender. Skipping those would silently ignore the rule they set.
         if replies_sent_in_thread(db, user_id=user_id,
                                   thread_id=msg.thread_id) >= AUTO_REPLIES_PER_THREAD:
             continue  # the loop backstop: this thread has had its auto-replies today

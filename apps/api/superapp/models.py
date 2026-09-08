@@ -473,6 +473,10 @@ class InboxDraft(Base):
     # finish; it is never auto-scheduled and send_due holds it at the deadline.
     generation_status: Mapped[str] = mapped_column(String(16), default="ready")  # ready | needs_input | failed | refused
     generation_reason: Mapped[str] = mapped_column(String(200), default="")
+    # Imported private material (notes, transcripts, documents) informed these
+    # words. The sender's own text chose what was recalled, so a person reads
+    # this one before it goes out, however it was delegated.
+    used_imported_context: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

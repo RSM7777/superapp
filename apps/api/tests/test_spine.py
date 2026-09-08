@@ -2888,3 +2888,124 @@ def test_import_endpoints_are_mounted():
     bad = client.post("/v1/knowledge/import", headers=AUTH,
                       json={"title": "x", "text": "y", "occurred_at": "last tuesday"})
     assert bad.status_code == 422, "a date we cannot parse must not become 'today'"
+
+
+def test_gmail_history_reader_actually_runs():
+    """The rebase dropped an import that only the deleted stub fixture had
+    used, so the real history reader raised on its first line while every
+    test stayed green: nothing drives GmailClient.history. This does."""
+    from superapp.inbox.gmail_client import GmailClient
+
+    c = GmailClient({"access_token": "t", "expiry_ts": 9e9})
+    pages = {"first": {"messages": [{"id": "m1"}]}}
+    seen = {}
+
+    def fake_get(path, **params):
+        if path == "/messages":
+            seen["q"] = params.get("q", "")
+            return pages["first"]
+        return {"id": "m1", "labelIds": ["INBOX"], "internalDate": "0",
+                "snippet": "hello", "payload": {"headers": [
+                    {"name": "From", "value": "Priya <priya@eureka.io>"},
+                    {"name": "Subject", "value": "re: the slot"}]}}
+    c._get = fake_get
+    out = c.history(months=24, limit=5)
+    assert len(out) == 1 and out[0]["from_addr"] == "priya@eureka.io"
+    assert "after:" in seen["q"] and "-in:chats" in seen["q"]
+
+
+def test_every_chunk_is_embedded_not_just_the_first_128():
+    """Voyage caps a request at 128 inputs. Slicing to the first 128 and
+    returning them silently dropped every later chunk while the import
+    reported it stored — the exact failure the chunker exists to prevent."""
+    import superapp.config as config_module
+    import superapp.memory as memory
+
+    settings = config_module.get_settings()
+    prev = settings.voyage_api_key
+    settings.voyage_api_key = "test-key"
+    batches = []
+
+    class _Resp:
+        def __init__(self, n): self._n = n
+        def raise_for_status(self): return None
+        def json(self): return {"data": [{"embedding": [0.0] * memory.DIMS}
+                                         for _ in range(self._n)]}
+
+    def fake_post(url, **kw):
+        n = len(kw["json"]["input"])
+        batches.append(n)
+        return _Resp(n)
+
+    orig = memory.httpx.post
+    memory.httpx.post = fake_post
+    try:
+        vecs, status = memory.embed([f"chunk {i}" for i in range(300)])
+        assert status == "ok"
+        assert len(vecs) == 300, f"only {len(vecs)} of 300 chunks embedded"
+        assert batches == [128, 128, 44], batches
+    finally:
+        memory.httpx.post = orig
+        settings.voyage_api_key = prev
+
+
+def test_a_reply_never_quotes_another_correspondent():
+    """Recall for a reply is driven by the SENDER'S own words, and the result
+    is fed into a reply addressed back to them. Past mail is therefore
+    admitted only when it involves this correspondent or this thread, and a
+    draft built on imported private notes is barred from sending itself."""
+    from superapp.agents.inbox import _evidence
+    from superapp.models import InboxMessage, utcnow
+    import superapp.memory as memory
+
+    db = SessionLocal()
+    m = InboxMessage(user_id="recall-tester", account_email="h@x.com",
+                     gmail_msg_id="recall-1", thread_id="thread-abc",
+                     from_name="Priya", from_addr="priya@eureka.io",
+                     subject="the accelerator", body_text="Where did we land?",
+                     tier="needs_reply", received_at=utcnow())
+    db.add(m)
+    db.flush()
+
+    def fake_recall(db_, *, agent, user_id, query, k=5):
+        return [
+            # theirs: same correspondent
+            {"when": "", "source": "mail", "author": "priya@eureka.io", "title": "",
+             "project": "", "content": "we agreed the demo slot", "source_ref": "x",
+             "domain": "inbox", "kind": "sent", "degraded": False},
+            # somebody else's exchange entirely
+            {"when": "", "source": "mail", "author": "banker@bank.example", "title": "",
+             "project": "", "content": "your loan balance is", "source_ref": "y",
+             "domain": "inbox", "kind": "sent", "degraded": False},
+            # a note the user deliberately imported
+            {"when": "", "source": "import", "author": "me", "title": "board notes",
+             "project": "", "content": "our walkaway number is", "source_ref": "z",
+             "domain": "knowledge", "kind": "note", "degraded": False},
+        ]
+
+    orig = memory.recall_for_agent
+    memory.recall_for_agent = fake_recall
+    try:
+        ev = _evidence(db, m, deep=True)
+    finally:
+        memory.recall_for_agent = orig
+
+    texts = " ".join(r["text"] for r in ev["related_context"])
+    assert "demo slot" in texts                 # theirs, kept
+    assert "loan balance" not in texts          # a stranger's exchange, dropped
+    assert "walkaway number" in texts           # imported reference, kept...
+    assert ev["used_imported"] is True          # ...but the draft is now held
+    db.rollback()
+    db.close()
+
+
+def test_a_draft_built_on_imported_notes_never_auto_sends():
+    from superapp.models import InboxDraft
+    from superapp.substrate.inbox import draft_unsendable
+
+    d = InboxDraft(user_id="u", message_id="m", body="text",
+                   generation_status="ready", used_imported_context=True)
+    why = draft_unsendable(d)
+    assert why and "read it before it goes" in why
+    d.used_imported_context = False
+    assert draft_unsendable(d) is None

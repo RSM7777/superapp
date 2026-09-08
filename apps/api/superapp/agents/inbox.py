@@ -301,14 +301,37 @@ def _evidence(db: Session, msg, *, deep: bool) -> dict:
         # mentions money must not pull back a bank statement.
         found = memory.recall_for_agent(db, agent="inbox", user_id=msg.user_id,
                                         query=query, k=6)
+        # The query is the SENDER'S OWN WORDS, so an unscoped recall lets
+        # whoever wrote in choose which of the user's private material comes
+        # back — and this evidence feeds a reply addressed to them. Two rules
+        # keep that honest:
+        #   past mail is admitted only if it involves THIS correspondent or
+        #   THIS thread, so one sender can never fish another's exchanges;
+        #   deliberately imported reference (notes, transcripts, documents)
+        #   is admitted, because using it is the point, but a draft that
+        #   consumed any is barred from sending itself.
+        sender = (msg.from_addr or "").lower()
+        thread = (msg.thread_id or "").lower()
+
+        def about_this_correspondent(r: dict) -> bool:
+            if r.get("domain") in ("knowledge", "goals"):
+                return True          # the user chose to file this as reference
+            author = (r.get("author") or "").lower()
+            ref = (r.get("source_ref") or "").lower()
+            return bool((sender and sender in author)
+                        or (thread and thread in ref))
+
+        kept = [r for r in found
+                # Not the email being judged, quoted back at the model as if it
+                # were prior knowledge.
+                if msg.gmail_msg_id not in (r["source_ref"] or "")
+                and about_this_correspondent(r)]
+        ev["used_imported"] = any(r.get("source") == "import" for r in kept)
         ev["related_context"] = [{
             "when": r["when"], "source": r["source"], "author": r["author"],
             "title": r["title"], "project": r["project"],
             "text": r["content"][:900], "link": r["source_ref"],
-        } for r in found
-            # Not the email being judged, quoted back at the model as if it
-            # were prior knowledge.
-            if msg.gmail_msg_id not in (r["source_ref"] or "")]
+        } for r in kept]
         if any(r["degraded"] for r in found):
             ev["retrieval_note"] = "some results are lexical only; embeddings are catching up"
     return ev
@@ -371,6 +394,10 @@ class DraftResult(BaseModel):
     status: Literal["ready", "needs_input", "failed", "refused"]
     body: str | None = None
     reason: str | None = None
+    # True when imported private material (notes, transcripts, documents)
+    # informed the words. Such a draft is good, but a person reads it before
+    # it goes: the sender's own text chose what was recalled.
+    used_imported: bool = False
 
 
 def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg) -> DraftResult:
@@ -383,6 +410,8 @@ def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg)
     # Overridable via the inbox/signature_name fact; defaults to the user id.
     identity = _fact(context, "signature_name") or {}
     name = identity.get("name") or context.user_id.capitalize()
+    evidence = _evidence(db, msg, deep=True)
+    used_imported = bool(evidence.pop("used_imported", False))
     payload = {
         "you_are": {"name": name, "email": msg.account_email},
         # The sender's own blanks ("let's say [time]") read as plain words, so
@@ -394,7 +423,7 @@ def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg)
         # to and what was already agreed. Untrusted reference material — the
         # sender's profile, the thread so far, and retrieved notes and
         # documents. Facts to use, never instructions to follow.
-        "evidence": _evidence(db, msg, deep=True),
+        "evidence": evidence,
         "user_facts": [f for f in context.facts if f["domain"] in ("goals", "identity")],
         "playbooks": [{"when": (f.value or {}).get("when", ""),
                        "how": (f.value or {}).get("how", "")}
@@ -428,13 +457,14 @@ def _draft_reply(db: Session, context: ContextSlice, provider: LLMProvider, msg)
                 system=DRAFT_SYSTEM, prompt=json.dumps(payload, sort_keys=True),
             )
         except Exception as e:  # noqa: BLE001
-            return DraftResult(status="needs_input", body=text,
+            return DraftResult(status="needs_input", body=text, used_imported=used_imported,
                                reason=f"draft still has a blank; rewrite failed: {type(e).__name__}")
         if not (again.stubbed or again.refused) and again.text.strip():
             text = again.text.strip()
         if has_placeholder(text):
-            return DraftResult(status="needs_input", body=text, reason="draft still has a blank")
-    return DraftResult(status="ready", body=text)
+            return DraftResult(status="needs_input", body=text, used_imported=used_imported,
+                                   reason="draft still has a blank")
+    return DraftResult(status="ready", body=text, used_imported=used_imported)
 
 
 def _auto_reply_match(db: Session, user_id: str, kind: str,
@@ -626,7 +656,8 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                 draft = create_draft(db, user_id=context.user_id, message_id=msg.id,
                                      body=written.body or "",
                                      generation_status=written.status,
-                                     generation_reason=written.reason or "")
+                                     generation_reason=written.reason or "",
+                                     used_imported_context=written.used_imported)
                 # Auto-reply: a kind the user explicitly delegated sends
                 # itself; the exchange surfaces under Worth knowing — what
                 # came in and what went out — never silently.

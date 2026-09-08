@@ -125,16 +125,25 @@ def sender_history(db: Session, *, user_id: str, addr: str) -> dict:
     addr = (addr or "").lower().strip()
     if not addr:
         return {}
+    # Addresses are stored as the sender spelled them, so compare folded:
+    # "Priya@Eureka.io" and "priya@eureka.io" are one correspondent, and a
+    # case-sensitive match would report a lifelong contact as a stranger.
+    same_sender = func.lower(MailHistory.from_addr) == addr
+    # Recipients live in one comma-joined column, so match the WHOLE address
+    # between delimiters. An unanchored substring lets "s@x.com" inherit
+    # "boss@x.com"'s history, and underscores are wildcards in LIKE.
+    replied_to = func.concat(",", func.lower(MailHistory.to_addrs), ",").contains(
+        f",{addr},", autoescape=True)
     inbound = db.scalar(select(func.count()).select_from(MailHistory).where(
-        MailHistory.user_id == user_id, MailHistory.from_addr == addr,
+        MailHistory.user_id == user_id, same_sender,
         MailHistory.direction == "inbound")) or 0
     outbound = db.scalar(select(func.count()).select_from(MailHistory).where(
         MailHistory.user_id == user_id, MailHistory.direction == "outbound",
-        MailHistory.to_addrs.contains(addr))) or 0
+        replied_to)) or 0
     first = db.scalar(select(func.min(MailHistory.occurred_at)).where(
-        MailHistory.user_id == user_id, MailHistory.from_addr == addr))
+        MailHistory.user_id == user_id, same_sender))
     last = db.scalar(select(func.max(MailHistory.occurred_at)).where(
-        MailHistory.user_id == user_id, MailHistory.from_addr == addr))
+        MailHistory.user_id == user_id, same_sender))
     return {
         "messages_from_them": inbound,
         "replied_to_them": outbound,

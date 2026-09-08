@@ -58,16 +58,27 @@ def embed(texts: list[str]) -> tuple[list[list[float]], str]:
     settings = get_settings()
     if not settings.voyage_api_key:
         return _stub_embed(texts), "stub"
+    # Voyage caps a request at 128 inputs. Slicing to the first 128 and
+    # returning them would be silent data loss: the caller zips vectors
+    # against chunks, so everything past the 128th is dropped while the
+    # import reports it stored. Page instead, and refuse to return a short
+    # list — a caller that cannot embed everything keeps the text pending.
+    out: list[list[float]] = []
     try:
-        resp = httpx.post(
-            "https://api.voyageai.com/v1/embeddings",
-            headers={"Authorization": f"Bearer {settings.voyage_api_key}"},
-            json={"model": "voyage-3.5-lite", "input": texts[:128],
-                  "output_dimension": DIMS},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return [d["embedding"] for d in resp.json()["data"]], "ok"
+        for i in range(0, len(texts), 128):
+            resp = httpx.post(
+                "https://api.voyageai.com/v1/embeddings",
+                headers={"Authorization": f"Bearer {settings.voyage_api_key}"},
+                json={"model": "voyage-3.5-lite", "input": texts[i:i + 128],
+                      "output_dimension": DIMS},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            out += [d["embedding"] for d in resp.json()["data"]]
+        if len(out) != len(texts):
+            raise EmbeddingUnavailable(
+                f"embedded {len(out)} of {len(texts)} chunks")
+        return out, "ok"
     except httpx.HTTPError as e:
         raise EmbeddingUnavailable(str(e)) from e
 

@@ -57,12 +57,14 @@ def insert_message(db: Session, *, user_id: str, account_email: str, msg: dict) 
 
 
 def create_draft(db: Session, *, user_id: str, message_id: str, body: str,
-                 generation_status: str = "ready", generation_reason: str = "") -> InboxDraft:
+                 generation_status: str = "ready", generation_reason: str = "",
+                 used_imported_context: bool = False) -> InboxDraft:
     """A draft the person wrote is `ready` by definition. One the model wrote
     carries whatever the drafter reported — and anything but `ready` can never
     send itself."""
     draft = InboxDraft(user_id=user_id, message_id=message_id, body=body,
-                       generation_status=generation_status, generation_reason=generation_reason)
+                       generation_status=generation_status, generation_reason=generation_reason,
+                       used_imported_context=used_imported_context)
     db.add(draft)
     db.flush()
     return draft
@@ -73,6 +75,8 @@ def draft_unsendable(draft) -> str | None:
     send path (the sync gate, the arming, the deadline re-check, the rule-enable
     sweep, the tap, the spoken "send it"): words the model never finished, or
     that nobody wrote, never leave. A person's own edit marks a draft ready."""
+    if getattr(draft, "used_imported_context", False):
+        return ("this one quotes your own notes, so you read it before it goes")
     if getattr(draft, "generation_status", "ready") != "ready":
         why = draft.generation_reason or draft.generation_status
         return f"draft was never finished ({why})"
