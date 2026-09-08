@@ -1,8 +1,8 @@
 """Headers kept at ingest, deterministic signals, and importance separated
 from reply-obligation.
 
-Revision ID: 0020
-Revises: 0019
+Revision ID: 0021
+Revises: 0020
 
 Two changes, both prerequisites for scoring triage against a labelled corpus.
 
@@ -22,8 +22,8 @@ Idempotent (create_all races alembic).
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0020"
-down_revision = "0019"
+revision = "0021"
+down_revision = "0020"
 branch_labels = None
 depends_on = None
 

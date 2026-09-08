@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 from ..auth import current_user_id
 from ..config import get_settings
 from ..db import get_db
-from ..inbox.gmail_client import GmailClient
 from ..kernel import record_decision
 from ..llm.provider import LLMProvider
 from ..memory import recall, remember
@@ -27,7 +26,6 @@ from ..models import InboxMessage, utcnow
 from ..substrate import get_context
 from ..substrate.events import append_event
 from ..substrate.inbox import create_draft, get_draft
-from ..vault import get_token
 from ..voice import tts
 
 router = APIRouter(prefix="/v1/voice", tags=["voice"])
@@ -595,8 +593,13 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
         accts = accounts(db, user_id)
         if not accts:
             return {"say": "No mailbox is connected yet."}
-        token = get_token(db, user_id=user_id, provider=f"gmail:{accts[0].email}")
-        client = GmailClient(json.loads(token) if token else None)
+        from ..inbox.base import MailError
+        from ..inbox.factory import client_for
+        try:
+            client = client_for(db, user_id, accts[0])
+        except MailError:
+            return {"say": f"I can't reach {accts[0].email} right now. "
+                           "Reconnect it in Profile and I'll send this."}
         subject = parsed.get("subject") or "(no subject)"
         # Idempotency: a duplicate action tag (stream retries) or a repeated
         # model emission must never mail someone twice. Same recipient +
@@ -613,7 +616,11 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
             if (e.payload.get("to") == addr
                     and e.payload.get("body", "")[:500] == parsed["reply_body"][:500]):
                 return {"say": "Already sent — it went to them a moment ago."}
-        sent_id = client.send_new(to_addr=addr, subject=subject, body=parsed["reply_body"])
+        try:
+            sent_id = client.send_new(to_addr=addr, subject=subject, body=parsed["reply_body"])
+        except MailError:
+            return {"say": f"I couldn't send from {accts[0].email} — it needs "
+                           "reconnecting in Profile. Nothing went out."}
         append_event(db, user_id=user_id, type="email_sent_new", agent="orb", domain="inbox",
                      payload={"to": addr, "subject": subject,
                               "body": parsed["reply_body"][:2000],
@@ -653,12 +660,11 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
                 return {"say": "That one is already on its way."}
             draft.status = "auto_sending"
         msg = db.get(InboxMessage, draft.message_id)
-        token = get_token(db, user_id=user_id, provider=f"gmail:{msg.account_email}")
-        client = GmailClient(json.loads(token) if token else None)
+        from ..inbox.base import MailError as _MailError
+        from ..inbox.factory import send_via
         try:
-            sent_id = client.send_reply(to_addr=msg.from_addr, subject=msg.subject,
-                                        body=draft.body, thread_id=msg.thread_id)
-        except Exception:
+            sent_id = send_via(db, user_id, msg, draft.body)
+        except Exception as exc:
             if was_auto:
                 draft.status = "waiting"
                 draft.auto_send_at = None
@@ -666,6 +672,12 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
                 db.commit()
                 from ..autosend import end_activity_held
                 end_activity_held(db, user_id)
+            if isinstance(exc, _MailError):
+                # A spoken turn must answer in speech. Escaping to the 409
+                # handler returns a body with no `say`, and the orb replies
+                # "Say that once more?" forever.
+                return {"say": f"I couldn't send that — {msg.account_email} needs "
+                               "reconnecting in Profile. The draft is still waiting."}
             raise
         draft.status = "sent"
         draft.sent_at = utcnow()

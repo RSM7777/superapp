@@ -8,18 +8,27 @@ from ..inbox.gmail_client import clean_email_text as _clean
 from ..models import Event, GmailAccount, InboxDraft, InboxMessage
 
 
-def upsert_account(db: Session, *, user_id: str, email: str) -> GmailAccount:
+def upsert_account(db: Session, *, user_id: str, email: str,
+                   provider: str = "gmail") -> GmailAccount:
+    """The same address may exist on two providers, so both identify a row.
+    An older row with no provider set is adopted rather than duplicated."""
     acct = db.scalar(select(GmailAccount).where(
-        GmailAccount.user_id == user_id, GmailAccount.email == email))
+        GmailAccount.user_id == user_id, GmailAccount.email == email,
+        GmailAccount.provider == provider))
     if acct is None:
-        acct = GmailAccount(user_id=user_id, email=email)
+        acct = GmailAccount(user_id=user_id, email=email, provider=provider)
         db.add(acct)
         db.flush()
     return acct
 
 
 def accounts(db: Session, user_id: str) -> list[GmailAccount]:
-    return list(db.scalars(select(GmailAccount).where(GmailAccount.user_id == user_id)))
+    """Ordered, because the caller derives each mailbox's colour and the
+    PRIMARY badge from position. An unordered query silently recoloured a
+    person's mailboxes whenever a new row appeared."""
+    return list(db.scalars(select(GmailAccount)
+                           .where(GmailAccount.user_id == user_id)
+                           .order_by(GmailAccount.created_at, GmailAccount.id)))
 
 
 def insert_message(db: Session, *, user_id: str, account_email: str, msg: dict) -> InboxMessage | None:

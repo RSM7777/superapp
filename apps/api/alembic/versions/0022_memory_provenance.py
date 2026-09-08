@@ -1,8 +1,8 @@
 """Memory keeps provenance, chunks long material, and admits when it failed.
 Plus mail_history: the conversation record the inbox twin is not.
 
-Revision ID: 0021
-Revises: 0020
+Revision ID: 0022
+Revises: 0021
 
 Three problems this fixes.
 
@@ -28,8 +28,8 @@ a queue — nothing in it is ever triaged, drafted for, archived or replied to.
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0021"
-down_revision = "0020"
+revision = "0022"
+down_revision = "0021"
 branch_labels = None
 depends_on = None
 

@@ -1,7 +1,7 @@
 """Drafts remember how they were written, not just whether they were sent.
 
-Revision ID: 0019
-Revises: 0018
+Revision ID: 0020
+Revises: 0019
 
 Idempotent (create_all races alembic). Backfills: any draft whose body is the
 old failure fallback ("(stub draft)") is marked failed so it can never
@@ -10,8 +10,8 @@ auto-send — that fallback invented a cheerful yes whenever the model refused.
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0019"
-down_revision = "0018"
+revision = "0020"
+down_revision = "0019"
 branch_labels = None
 depends_on = None
 

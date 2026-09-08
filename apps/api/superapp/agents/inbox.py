@@ -27,7 +27,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..inbox.gmail_client import GmailClient
 from ..llm.provider import LLMProvider
 from ..push import send_push
 from ..sdui.blocks import (
@@ -38,7 +37,6 @@ from ..substrate import ContextSlice
 from ..substrate.events import recent_events
 from ..substrate.inbox import (accounts, create_draft, insert_message,
     AUTO_REPLIES_PER_THREAD, replies_sent_in_thread)
-from ..vault import get_token
 from ..kernel import record_decision
 from .base import EventWrite, FactWrite, ThinkResult, register_agent
 
@@ -479,16 +477,24 @@ def _flag_reauth(db: Session, user_id: str, email: str) -> None:
                   agent="inbox")
 
 
-def _heal_reauth(db: Session, user_id: str) -> None:
+def _heal_reauth(db: Session, user_id: str, email: str | None = None) -> None:
+    """Clear the reconnect alarm. With `email`, only when the alarm is about
+    THAT mailbox: otherwise a healthy mailbox clears a broken one's flag every
+    sync, which re-arms the "already warned" guard and fires the reconnect
+    push again on the very next run, eating the whole daily push budget."""
     from ..models import UserFact
     from ..substrate.facts import write_fact
 
     existing = db.scalar(select(UserFact).where(
         UserFact.user_id == user_id, UserFact.domain == "inbox",
         UserFact.key == "reauth_needed"))
-    if existing and (existing.value or {}).get("needed"):
-        write_fact(db, user_id=user_id, domain="inbox", key="reauth_needed",
-                   value={"needed": False}, confidence=1.0, source_agent="inbox")
+    if not (existing and (existing.value or {}).get("needed")):
+        return
+    flagged = (existing.value or {}).get("email") or ""
+    if email is not None and flagged and flagged != email:
+        return  # a different mailbox is the broken one; leave its alarm alone
+    write_fact(db, user_id=user_id, domain="inbox", key="reauth_needed",
+               value={"needed": False}, confidence=1.0, source_agent="inbox")
 
 
 def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
@@ -506,8 +512,15 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
         pass
 
     for acct in accounts(db, context.user_id):
-        token = get_token(db, user_id=context.user_id, provider=f"gmail:{acct.email}")
-        client = GmailClient(json.loads(token) if token else None)
+        from ..inbox.base import MailNotConnected
+        from ..inbox.factory import client_for
+        try:
+            client = client_for(db, context.user_id, acct)
+        except MailNotConnected:
+            # No usable credential. Say so and move to the next mailbox
+            # rather than pretending this one is fine.
+            _flag_reauth(db, context.user_id, acct.email)
+            continue
         try:
             msgs, new_hid = client.new_messages(acct.history_id)
         except httpx.HTTPStatusError as exc:
@@ -518,7 +531,7 @@ def _sync(db: Session, context: ContextSlice, trigger: dict) -> ThinkResult:
                 _flag_reauth(db, context.user_id, acct.email)
                 continue
             raise
-        _heal_reauth(db, context.user_id)
+        _heal_reauth(db, context.user_id, acct.email)
         acct.history_id = new_hid
         backfill_ids: set[str] = set()
         if trigger.get("kind") in ("backfill", "user_refresh"):

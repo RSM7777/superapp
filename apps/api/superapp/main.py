@@ -2,6 +2,9 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+from .inbox.base import MailError
 
 from . import models  # noqa: F401 — register tables
 from .agents import finance, hub, inbox, nutrition, orchestrator, stylist  # noqa: F401 — register agents
@@ -24,6 +27,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Super App API", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(MailError)
+def _mail_error(request, exc: MailError):
+    """A mailbox that cannot be reached is a conflict the person can fix by
+    reconnecting, not a server fault. Saying so plainly matters: the whole
+    point of the provider seam is that a send which cannot happen fails
+    visibly instead of being reported as delivered."""
+    return JSONResponse(status_code=409,
+                        content={"detail": str(exc), "reconnect": True})
 app.include_router(screen.router)
 app.include_router(nutrition_router.router)
 app.include_router(finance_router.router)

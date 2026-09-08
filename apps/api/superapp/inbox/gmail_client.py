@@ -1,7 +1,10 @@
-"""Thin Gmail client (httpx, no SDK) with OAuth, incremental sync via history,
-send, and Pub/Sub watch. Stub mode (no google_client_id): a deterministic fake
-mailbox spanning every tier — urgent asks, FYIs, newsletters, promos, and a
-retailer receipt (the Phase 4d hook) — so the whole vertical runs offline.
+"""Gmail as a MailClient (httpx, no SDK): OAuth, incremental sync via history,
+send, and Pub/Sub watch.
+
+This class no longer knows how to be fake. The offline mailbox moved to
+stub_client.StubMailClient and is selected by the ACCOUNT's provider, so a
+real mailbox missing its token can no longer quietly become a fake one that
+reports imaginary sends as delivered.
 
 Scopes climb the trust ladder with settings.gmail_scope_tier:
   read -> gmail.readonly | send -> +gmail.send | modify -> +gmail.modify
@@ -11,13 +14,14 @@ import html as html_mod
 import json
 import re as re_mod
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.utils import getaddresses, parseaddr
 
 import httpx
 
 from ..config import get_settings
+from typing import Callable
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -75,12 +79,21 @@ _html_to_text = clean_email_text
 
 
 class GmailClient:
-    """token: dict {access_token, refresh_token, expiry_ts} (vault-stored JSON)."""
+    """token: dict {access_token, refresh_token, expiry_ts} (vault-stored JSON).
 
-    def __init__(self, token: dict | None = None) -> None:
+    on_token_refresh, when given, is called with the whole token dict after a
+    refresh so the caller can persist it. Google does not rotate refresh
+    tokens, so for Gmail this is bookkeeping; the protocol carries it because
+    other providers do rotate and would otherwise die silently.
+    """
+
+    provider = "gmail"
+
+    def __init__(self, token: dict | None = None,
+                 on_token_refresh: Callable[[dict], None] | None = None) -> None:
         self.settings = get_settings()
-        self.stubbed = not self.settings.google_client_id
         self.token = token or {}
+        self._on_token_refresh = on_token_refresh
 
     # -- oauth ---------------------------------------------------------------
     def auth_url(self, state: str) -> str:
@@ -116,6 +129,10 @@ class GmailClient:
             }, timeout=30).raise_for_status().json()
             self.token["access_token"] = data["access_token"]
             self.token["expiry_ts"] = time.time() + data.get("expires_in", 3600) - 60
+            if data.get("refresh_token"):
+                self.token["refresh_token"] = data["refresh_token"]
+            if self._on_token_refresh:
+                self._on_token_refresh(dict(self.token))
         return self.token["access_token"]
 
     def _get(self, path: str, **params) -> dict:
@@ -130,19 +147,15 @@ class GmailClient:
 
     # -- profile / sync ------------------------------------------------------
     def profile(self) -> dict:
-        if self.stubbed:
-            return {"emailAddress": "stub@example.com", "historyId": "1000"}
         return self._get("/profile")
+
+    def address(self) -> str:
+        return self.profile()["emailAddress"]
 
     def new_messages(self, history_id: str) -> tuple[list[dict], str]:
         """Returns (messages, new_history_id). Empty history_id = fresh connect:
         NO backfill — set the watermark to now and only ever process new mail
         arriving in the Primary inbox from this point on."""
-        if self.stubbed:
-            if history_id:  # incremental after stub backfill: nothing new
-                return [], history_id
-            return _stub_mailbox(), "1000"
-
         if not history_id:
             return [], str(self.profile()["historyId"])
 
@@ -184,8 +197,6 @@ class GmailClient:
         """Recent Primary-inbox mail for a first fill: plain list + fetch,
         no history cursor. Category tabs (promos/social/updates) are
         filtered by _parse, same as live sync."""
-        if self.stubbed:
-            return []
         # Ask for Primary directly: recent INBOX ids are mostly category-tab
         # noise, which starves the fill after filtering.
         data = self._get("/messages", q="category:primary", maxResults=min(n * 2, 100))
@@ -312,9 +323,9 @@ class GmailClient:
 
     # -- actions -------------------------------------------------------------
     def send_reply(self, *, to_addr: str, subject: str, body: str, thread_id: str,
-                   auto: bool = False) -> str:
-        if self.stubbed:
-            return f"stub-sent-{int(time.time())}"
+                   external_id: str = "", auto: bool = False) -> str:
+        # external_id is unused here: Gmail attaches a reply to the THREAD.
+        # It travels for providers that reply to a specific message instead.
         mime = self.build_reply(to_addr=to_addr, subject=subject, body=body, auto=auto)
         raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
         return self._post("/messages/send", {"raw": raw, "threadId": thread_id})["id"]
@@ -331,63 +342,29 @@ class GmailClient:
         return mime
 
     def send_new(self, *, to_addr: str, subject: str, body: str) -> str:
-        if self.stubbed:
-            return f"stub-sent-new-{int(time.time())}"
         mime = MIMEText(body)
         mime["To"] = to_addr
         mime["Subject"] = subject
         raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
         return self._post("/messages/send", {"raw": raw})["id"]
 
-    def archive(self, gmail_msg_id: str) -> None:
-        if self.stubbed:
-            return
-        self._post(f"/messages/{gmail_msg_id}/modify", {"removeLabelIds": ["INBOX"]})
+    def archive(self, external_id: str) -> str | None:
+        """Gmail keeps the id when mail leaves the inbox, so nothing to return."""
+        self._post(f"/messages/{external_id}/modify", {"removeLabelIds": ["INBOX"]})
+        return None
 
     def watch(self) -> datetime | None:
         """Register Pub/Sub push. Re-call before expiry (~7 days)."""
-        if self.stubbed or not self.settings.gmail_pubsub_topic:
+        if not self.settings.gmail_pubsub_topic:
             return None
         data = self._post("/watch", {"topicName": self.settings.gmail_pubsub_topic,
                                      "labelIds": ["INBOX"]})
         return datetime.fromtimestamp(int(data["expiration"]) / 1000, tz=timezone.utc)
 
+    def subscribe(self) -> tuple[datetime | None, str]:
+        """Protocol form of watch(). Gmail's registration has no id of its own."""
+        return self.watch(), ""
 
-def _stub_mailbox() -> list[dict]:
-    now = datetime.now(timezone.utc)
 
-    def m(hours_ago, mid, name, addr, subject, body):
-        return {"gmail_msg_id": f"stub-{mid}", "thread_id": f"stub-t-{mid}",
-                "from_name": name, "from_addr": addr, "subject": subject,
-                "body_text": body,
-                "received_at": (now - timedelta(hours=hours_ago)).isoformat()}
-
-    return [
-        m(9, "eureka", "Priya Sharma", "priya@eureka.io", "Eureka! submission — deadline today EOD",
-          "Hi — final reminder that your Eureka! accelerator application closes today at 6pm. "
-          "You still need to confirm your demo slot. Can you reply with a yes/no and a time?"),
-        m(11, "marcus", "Marcus Reed", "marcus@sunriseprop.com", "Lease renewal — need your decision by Friday",
-          "Hi, your lease is up at the end of next month. Happy to renew for twelve months at the "
-          "same rent. Could you confirm by Friday so I can send the paperwork?"),
-        m(6, "mom", "Amma", "amma@gmail.com", "Sunday?",
-          "Are you coming home on Sunday? Making biryani. Let me know by tomorrow."),
-        m(14, "aws", "AWS Billing", "no-reply@aws.amazon.com", "Your AWS bill is available",
-          "Your invoice for August is now available. Total: $12.40. No action is required."),
-        m(20, "figma", "Figma", "team@figma.com", "Your file was moved",
-          "A file you own was moved to a new project by a teammate. No action needed."),
-        m(8, "myntra", "Myntra", "orders@myntra.com", "Order shipped: Navy oxford shirt",
-          "Your order #MN4821 (Roadster Navy Oxford Shirt, size M, Rs. 1,299) has shipped and "
-          "arrives Thursday."),
-        m(26, "substack", "Money Stuff", "mattlevine@substack.com", "Private credit is eating the world",
-          "Long newsletter about private credit markets..."),
-        m(30, "linkedin", "LinkedIn", "notifications@linkedin.com", "You appeared in 12 searches",
-          "See who's looking at your profile. Upgrade to Premium."),
-        m(33, "uniqlo", "UNIQLO", "promo@uniqlo.com", "48 HOURS ONLY: extra 30% off",
-          "Flash sale on everything. Shop now before it ends."),
-        m(40, "zomato", "Zomato", "offers@zomato.com", "Craving something? 60% off tonight",
-          "Use code HUNGRY60 tonight only."),
-        m(45, "medium", "Medium Daily", "digest@medium.com", "Stories for you",
-          "Today's picks based on your reading history."),
-        m(50, "twitter", "X", "info@x.com", "You have 3 new followers",
-          "See who followed you this week."),
-    ]
+# The offline mailbox now belongs to the stub PROVIDER, not to this client.
+from .stub_client import stub_mailbox as _stub_mailbox  # noqa: E402,F401  (back-compat)

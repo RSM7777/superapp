@@ -31,6 +31,16 @@ from superapp.main import app
 from superapp.substrate import append_event, get_context, read_facts, recent_events, write_fact
 
 Base.metadata.create_all(bind=engine)
+
+# Mail now belongs to an ACCOUNT, and an account declares its provider, so a
+# mailbox with no credential fails loudly instead of quietly faking a send.
+# Tests attribute messages to "h@x.com"; give it a real stub-provider row so
+# the factory resolves it exactly the way production resolves a live mailbox.
+with SessionLocal() as _seed:
+    from superapp.substrate.inbox import upsert_account as _upsert_account
+    _upsert_account(_seed, user_id="harshith", email="h@x.com", provider="stub")
+    _seed.commit()
+
 client = TestClient(app)
 AUTH = {"Authorization": "Bearer dev-token-change-me"}
 
@@ -1635,7 +1645,7 @@ def test_never_miss_raises_visibility_without_inventing_an_ask():
 
     uid = "nevermiss-tester"
     db = SessionLocal()
-    upsert_account(db, user_id=uid, email="stub@example.com")
+    upsert_account(db, user_id=uid, email="stub@example.com", provider="stub")
     _priority(PriorityBody(sender="aws.amazon.com"), user_id=uid, db=db)
     db.commit()
     run_think(db, agent="inbox", user_id=uid, trigger={"kind": "email_sync"})
@@ -1805,7 +1815,7 @@ def test_auto_reply_window_schedules_then_sends_at_deadline(monkeypatch):
     _drafts_write_themselves(monkeypatch)   # the stub brain no longer writes a sendable draft
     try:
         db = SessionLocal()
-        upsert_account(db, user_id=uid, email="stub@example.com")
+        upsert_account(db, user_id=uid, email="stub@example.com", provider="stub")
         # enough known mail that the sync does not treat the mailbox as a backfill
         for i in range(15):
             db.add(InboxMessage(user_id=uid, account_email="stub@example.com",
@@ -2087,7 +2097,7 @@ def _sync_delegated_sender(uid):
     config_module.get_settings().gmail_scope_tier = "send"
     autosend.TIMERS_ENABLED = False
     db = SessionLocal()
-    upsert_account(db, user_id=uid, email="stub@example.com")
+    upsert_account(db, user_id=uid, email="stub@example.com", provider="stub")
     for i in range(15):   # enough known mail that the sync is not treated as a backfill
         db.add(InboxMessage(user_id=uid, account_email="stub@example.com",
                             gmail_msg_id=f"{uid}-old-{i}", thread_id=f"{uid}-t-{i}",
@@ -2259,16 +2269,26 @@ def test_production_refuses_a_stub_brain():
 
 
 
-def _intercept_gmail(monkeypatch):
-    """Record every send instead of reaching Gmail."""
+def _intercept_sends(monkeypatch):
+    """Record every send instead of letting one leave.
+
+    Patches BOTH providers. Which one a message uses is now a property of its
+    account, and these tests care that the words never went out — not which
+    client would have carried them.
+    """
     from superapp.inbox.gmail_client import GmailClient
+    from superapp.inbox.stub_client import StubMailClient
     calls = []
 
-    def fake(self, *, to_addr, subject, body, thread_id, auto=False):
+    def fake(self, *, to_addr, subject, body, thread_id, external_id="", auto=False):
         calls.append({"to": to_addr, "body": body, "auto": auto})
         return f"sent-{len(calls)}"
-    monkeypatch.setattr(GmailClient, "send_reply", fake)
+    for cls in (GmailClient, StubMailClient):
+        monkeypatch.setattr(cls, "send_reply", fake)
     return calls
+
+
+_intercept_gmail = _intercept_sends   # the name these tests were written under
 
 
 def _needs_reply(db, uid, gmail_msg_id, kind="recruiter pings"):
@@ -2658,3 +2678,203 @@ def test_import_endpoints_are_mounted():
     bad = client.post("/v1/knowledge/import", headers=AUTH,
                       json={"title": "x", "text": "y", "occurred_at": "last tuesday"})
     assert bad.status_code == 422, "a date we cannot parse must not become 'today'"
+
+def test_live_mailbox_without_credentials_never_fake_sends():
+    """The bug this seam exists to close: a real mailbox whose token is gone
+    used to fall back to the offline client, invent a message id, and report
+    "Sent." for mail that never left. It must fail instead, and the draft
+    must still be waiting for the person afterwards."""
+    import superapp.config as config_module
+
+    from superapp import autosend
+    from superapp.inbox.base import MailNotConnected
+    from superapp.inbox.factory import client_for, send_via
+    from superapp.models import Event, InboxDraft, InboxMessage, utcnow
+    from superapp.substrate.inbox import create_draft, upsert_account
+
+    settings = config_module.get_settings()
+    prev = settings.gmail_scope_tier
+    settings.gmail_scope_tier = "send"
+    autosend.TIMERS_ENABLED = False
+    try:
+        db = SessionLocal()
+        # A Gmail mailbox with no credential in the vault: signed out, or never
+        # finished linking. google_client_id is unset in tests, which is exactly
+        # the condition that used to make every client silently fake.
+        acct = upsert_account(db, user_id="harshith", email="gone@gmail.com",
+                              provider="gmail")
+        m = InboxMessage(user_id="harshith", account_email="gone@gmail.com",
+                         gmail_msg_id="nocred-1", thread_id="nocred-t",
+                         from_name="Real Person", from_addr="real@example.com",
+                         subject="are we on?", body_text="Confirm?",
+                         tier="needs_reply", note_kind="plans", received_at=utcnow())
+        db.add(m)
+        db.flush()
+        d = create_draft(db, user_id="harshith", message_id=m.id, body="Yes, confirmed.")
+        db.commit()
+        did, mid = d.id, m.id
+
+        # Building a client for it is refused outright.
+        try:
+            client_for(db, "harshith", acct)
+            raise AssertionError("a mailbox with no token must not produce a client")
+        except MailNotConnected:
+            pass
+        try:
+            send_via(db, "harshith", db.get(InboxMessage, mid), "Yes, confirmed.")
+            raise AssertionError("sending from a mailbox with no token must fail")
+        except MailNotConnected:
+            pass
+        db.close()
+
+        # ...and through the endpoint, the draft survives unsent.
+        r = client.post(f"/v1/inbox/drafts/{did}/send", headers=AUTH)
+        assert r.status_code >= 400, f"expected a failure, got {r.status_code}"
+        db = SessionLocal()
+        assert db.get(InboxDraft, did).status == "waiting"
+        assert not [e for e in db.scalars(select(Event).where(Event.type == "draft_sent"))
+                    if (e.payload or {}).get("draft_id") == did]
+
+        # The auto-reply window holds it rather than reporting a phantom send.
+        from datetime import timedelta
+        d = db.get(InboxDraft, did)
+        d.status = "auto_pending"
+        d.auto_send_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+        assert autosend.send_due(db, draft_id=did) == 0
+        db.commit()
+        assert db.get(InboxDraft, did).status == "waiting"
+        db.close()
+    finally:
+        settings.gmail_scope_tier = prev
+        autosend.TIMERS_ENABLED = True
+
+
+def test_existing_gmail_mailboxes_keep_their_vault_key():
+    """A row written without a provider must still resolve to exactly the
+    vault key its token was stored under, so no credential is orphaned and
+    nobody reconnects. The stored default is what is under test here, which
+    is the same value the migration backfills, so flush before asserting: a
+    transient object would pass on the code's fallback alone."""
+    from superapp.inbox.factory import provider_of, vault_key
+    from superapp.models import GmailAccount
+
+    db = SessionLocal()
+    try:
+        legacy = GmailAccount(user_id="legacy-tester", email="someone@gmail.com")
+        db.add(legacy)
+        db.flush()
+        assert legacy.provider == "gmail"          # the column default itself
+        assert provider_of(legacy) == "gmail"
+        assert vault_key(legacy) == "gmail:someone@gmail.com"
+
+        outlook = GmailAccount(user_id="legacy-tester", email="someone@outlook.com",
+                               provider="outlook")
+        db.add(outlook)
+        db.flush()
+        assert vault_key(outlook) == "outlook:someone@outlook.com"
+    finally:
+        db.rollback()   # leave no mailboxes behind; others count by position
+        db.close()
+
+
+def test_mailbox_order_is_stable_so_colours_and_primary_do_not_move():
+    """Colour and the PRIMARY badge are derived from position, so an
+    unordered query silently recoloured a person's mailboxes whenever a row
+    was added. Order is part of the contract."""
+    from superapp.substrate.inbox import accounts, upsert_account
+
+    db = SessionLocal()
+    uid = "order-tester"
+    for addr in ("first@gmail.com", "second@gmail.com", "third@gmail.com"):
+        upsert_account(db, user_id=uid, email=addr, provider="gmail")
+        db.commit()
+    got = [a.email for a in accounts(db, uid)]
+    assert got == ["first@gmail.com", "second@gmail.com", "third@gmail.com"]
+    # the same address on a second provider is a separate mailbox, not a clash
+    upsert_account(db, user_id=uid, email="first@gmail.com", provider="outlook")
+    db.commit()
+    assert len(accounts(db, uid)) == 4
+    db.close()
+
+
+def test_stub_mailbox_is_a_provider_not_a_global_mode():
+    """Being offline is a property of the ACCOUNT now. A stub mailbox still
+    works end to end, and its sends are recorded rather than invented."""
+    from superapp.inbox.factory import client_for
+    from superapp.inbox.stub_client import SENT, StubMailClient
+    from superapp.substrate.inbox import upsert_account
+
+    db = SessionLocal()
+    acct = upsert_account(db, user_id="harshith", email="h@x.com", provider="stub")
+    db.commit()
+    c = client_for(db, "harshith", acct)
+    assert isinstance(c, StubMailClient) and c.provider == "stub"
+    msgs, cursor = c.new_messages("")
+    assert msgs and cursor and all("gmail_msg_id" in m for m in msgs)
+    assert c.new_messages(cursor) == ([], cursor)   # the fake mailbox never grows
+    before = len(SENT)
+    sent_id = c.send_reply(to_addr="a@b.example", subject="hi", body="there",
+                           thread_id="t", external_id="x", auto=True)
+    assert len(SENT) == before + 1 and SENT[-1]["id"] == sent_id and SENT[-1]["auto"] is True
+    db.close()
+
+
+
+def test_offline_mailbox_survives_the_provider_migration():
+    """The offline mailbox predates the provider column. If the migration
+    backfilled it to "gmail" like everything else it would be handed to the
+    real Gmail client, which raises on its placeholder credential, and every
+    sync would fail with no way back. Assert the rule the migration encodes."""
+    import re
+    from pathlib import Path
+
+    sql = Path("alembic/versions/0019_mail_provider.py").read_text()
+    assert re.search(r"UPDATE gmail_accounts SET provider='stub'\s*\"?\s*\n?\s*\"?\s*WHERE email='stub@example.com'", sql), \
+        "0019 must repoint the offline mailbox at the stub provider"
+
+    # ...and the account that results is served by the stub client, not Gmail.
+    from superapp.inbox.factory import client_for
+    from superapp.inbox.stub_client import STUB_ADDRESS, StubMailClient
+    from superapp.substrate.inbox import upsert_account
+
+    db = SessionLocal()
+    acct = upsert_account(db, user_id="stub-migration-tester", email=STUB_ADDRESS,
+                          provider="stub")
+    db.flush()
+    assert isinstance(client_for(db, "stub-migration-tester", acct), StubMailClient)
+    db.rollback()
+    db.close()
+
+
+def test_a_broken_mailbox_keeps_its_alarm_when_another_is_healthy():
+    """One mailbox syncing fine used to clear the reconnect flag raised by a
+    different, broken one. That re-armed the 'already warned' guard, so the
+    reconnect push fired again on the very next sync and burned the day's
+    push budget."""
+    from superapp.agents.inbox import _flag_reauth, _heal_reauth
+    from superapp.models import UserFact
+
+    uid = "reauth-tester"
+    db = SessionLocal()
+
+    def flag_state():
+        f = db.scalar(select(UserFact).where(
+            UserFact.user_id == uid, UserFact.domain == "inbox",
+            UserFact.key == "reauth_needed"))
+        return (f.value or {}) if f else {}
+
+    _flag_reauth(db, uid, "broken@gmail.com")
+    db.commit()
+    assert flag_state().get("needed") is True
+
+    # a different, healthy mailbox must not silence it
+    _heal_reauth(db, uid, "healthy@gmail.com")
+    db.commit()
+    assert flag_state().get("needed") is True
+
+    # the mailbox that was actually broken coming back does silence it
+    _heal_reauth(db, uid, "broken@gmail.com")
+    db.commit()
+    assert flag_state().get("needed") is False
+    db.close()
