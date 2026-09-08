@@ -21,6 +21,9 @@ AGENT_SCOPES: dict[str, list[str] | None] = {
     "nutrition": ["nutrition", "goals", "health", "identity"],
     "finance": ["finance", "goals", "identity"],
     "inbox": ["inbox", "goals", "identity"],
+    # Groceries read the mailbox because receipts arrive there; nutrition
+    # because "what this household eats" is the same question from two sides.
+    "grocery": ["grocery", "inbox", "nutrition", "goals", "identity"],
     "stylist": ["wardrobe", "goals", "nutrition", "finance", "identity"],
 }
 
@@ -28,12 +31,13 @@ AGENT_SCOPES: dict[str, list[str] | None] = {
 # agent's scope covers that domain. Twins hold records; facts hold beliefs.
 def _twin_loaders() -> dict:
     from ..kernel import autonomy_context
-    from . import activity, finance, inbox, nutrition, wardrobe
+    from . import activity, finance, grocery, inbox, nutrition, wardrobe
 
     return {
         "nutrition": nutrition.meals_context,
         "finance": finance.finance_context,
         "wardrobe": wardrobe.wardrobe_context,
+        "grocery": grocery.grocery_context,
         "inbox": inbox.inbox_context,
         "activity": activity.activity_context,
         "autonomy": autonomy_context,
