@@ -116,8 +116,11 @@ class InstacartStore:
         # mutually exclusive, and sending both is a request it will reject.
         if line.product_ref and line.product_ref_kind == "upc":
             item["upcs"] = [line.product_ref]
-        elif line.product_ref and line.product_ref_kind == "id":
-            item["product_ids"] = [int(line.product_ref)] if line.product_ref.isdigit() else []
+        elif line.product_ref and line.product_ref_kind == "id" and line.product_ref.isdigit():
+            item["product_ids"] = [int(line.product_ref)]
+        # An unusable ref sends no identifier at all rather than an empty list:
+        # the name still matches, and an empty array is a request Instacart has
+        # no reason to accept.
         return item
 
     def quote(self, lines: list[OrderLine]) -> Quote:

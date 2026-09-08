@@ -496,7 +496,9 @@ class GroceryOrder(Base):
     lines: Mapped[list | None] = mapped_column(JSON, default=None)
     subtotal_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reason: Mapped[str] = mapped_column(String(300), default="")   # why Nano proposed it
-    external_id: Mapped[str] = mapped_column(String(120), default="")
+    # A placed order's platform id, or a handed-off basket's URL. Wide enough
+    # to be a URL: truncating one produces a link that loads nothing.
+    external_id: Mapped[str] = mapped_column(String(1024), default="")
     error: Mapped[str] = mapped_column(String(300), default="")
     confirmed_by: Mapped[str] = mapped_column(String(8), default="")   # "" | user
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -31,15 +31,19 @@ _CANON = {c.lower(): c for c in CATEGORIES}
 # whose purchase history is an average of neither.
 _PACKAGING = re.compile(
     r"\b(pack|pk|pkg|ct|count|ea|each|dozen|doz|bag|box|btl|bottle|jar|can|"
-    r"carton|tub|roll|rolls|oz|floz|lb|lbs|kg|g|gr|mg|ml|l|lt|ltr|gal|gallon|"
+    r"carton|tub|roll|rolls|oz|floz|lb|lbs|kg|g|gr|ml|l|lt|ltr|gal|gallon|"
     r"qt|quart|pt|pint|liter|litre|gram|grams|pound|pounds|ounce|ounces)\b", re.I)
 _MERCHANDISING = re.compile(
     r"\b(great|value|brand|family|size|club|select|signature|essentials?)\b", re.I)
 # A number glued to or followed by a unit is a package size, not a name.
 # Handled before bare digits so "1gal" and "1 gal" both disappear.
+#
+# `mg` is deliberately absent from both lists: milligrams are a STRENGTH, not a
+# package size. Nobody buys 500mg of flour, and "Advil 200mg" and "Advil 500mg"
+# are different products whose purchase histories must not be interleaved.
 _SIZE_EXPR = re.compile(
     r"\b\d+(?:\.\d+)?\s*(?:x\s*\d+(?:\.\d+)?\s*)?"
-    r"(?:oz|floz|fl\s*oz|lb|lbs|kg|g|gr|mg|ml|l|lt|ltr|gal|gallon|qt|quart|pt|"
+    r"(?:oz|floz|fl\s*oz|lb|lbs|kg|g|gr|ml|l|lt|ltr|gal|gallon|qt|quart|pt|"
     r"pint|ct|count|pk|pack|dozen|doz|liter|litre|gram|grams|pound|pounds|"
     r"ounce|ounces)\b", re.I)
 
@@ -63,8 +67,12 @@ def slugify(name: str) -> str:
     s = re.sub(r"[^a-z0-9\s]", " ", s)
     s = _PACKAGING.sub(" ", s)
     s = _MERCHANDISING.sub(" ", s)
-    # Any bare number left is a size or a lot code, never a name.
-    s = re.sub(r"\b\d+(?:\.\d+)?\b", " ", s)
+    # Numbers that survived the size pass are part of the NAME: "Vitamin D3
+    # 5000 IU", "7 Up", "Advil 200". Stripping them merged different dosages
+    # into one shelf item with interleaved history — the same corruption as
+    # merging 1% and 2% milk. Only long digit runs are dropped, because those
+    # are receipt lot and SKU codes rather than anything a person would say.
+    s = re.sub(r"\b\d{6,}\b", " ", s)
     tokens = sorted(set(t for t in s.split() if t))
     return " ".join(tokens)[:120] or re.sub(r"\s+", " ", (name or "").lower()).strip()[:120]
 
@@ -158,8 +166,12 @@ def purchases_for(db: Session, user_id: str, item_id: str) -> list[Bought]:
                    pack_amount=p.pack_amount, pack_unit=p.pack_unit or "") for p in rows]
 
 
-def item_state(db: Session, user_id: str, item: GroceryItem, now=None) -> dict:
-    f = forecast(purchases=purchases_for(db, user_id, item.id),
+def item_state(db: Session, user_id: str, item: GroceryItem, now=None,
+               purchases: list | None = None) -> dict:
+    """`purchases` lets a caller that already loaded them avoid a query per
+    item — the shelf renders every item on every screen load."""
+    f = forecast(purchases=(purchases if purchases is not None
+                            else purchases_for(db, user_id, item.id)),
                  category=item.category, last_purchased_at=item.last_purchased_at,
                  declared_out_at=item.declared_out_at, now=now)
     return {
@@ -176,7 +188,16 @@ def grocery_context(db: Session, user_id: str) -> dict:
     """The shelf slice of ContextSlice.domain_data — exactly what the screen draws."""
     items = list(db.scalars(select(GroceryItem).where(GroceryItem.user_id == user_id)
                             .order_by(GroceryItem.name)))
-    states = [item_state(db, user_id, i) for i in items]
+    # One query for every purchase this person has, grouped in memory. Asking
+    # per item cost 63 queries for a 60-item shelf, on every render.
+    by_item: dict[str, list[Bought]] = {}
+    for p in db.scalars(select(GroceryPurchase)
+                        .where(GroceryPurchase.user_id == user_id)
+                        .order_by(GroceryPurchase.purchased_at)):
+        by_item.setdefault(p.item_id, []).append(
+            Bought(at=p.purchased_at, quantity=p.quantity,
+                   pack_amount=p.pack_amount, pack_unit=p.pack_unit or ""))
+    states = [item_state(db, user_id, i, purchases=by_item.get(i.id, [])) for i in items]
 
     shelves = []
     for cat in CATEGORIES:

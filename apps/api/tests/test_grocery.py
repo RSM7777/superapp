@@ -539,3 +539,155 @@ def test_the_grocery_screen_is_reachable_and_voice_can_name_it():
     screens = CONVERSE_SCHEMA["properties"]["screen"]["enum"]
     assert "grocery" in screens
     assert "grocery_basket" in CONVERSE_SCHEMA["properties"]["action_type"]["enum"]
+
+
+# --- self-review fixes -----------------------------------------------------
+
+def test_voice_basket_actually_takes_you_to_the_shelf():
+    """Nano announced a basket it had just built and left the app on the same
+    screen: `_execute` returned the destination and the endpoint read only
+    "say", dropping it. The client navigates on action=="open_screen" plus a
+    screen name, so both have to survive the trip."""
+    from datetime import timedelta
+
+    from superapp.models import utcnow
+    from superapp.routers.voice import _execute
+    from superapp.substrate.grocery import record_purchase, upsert_item
+
+    db = SessionLocal()
+    uid = "v-nav"
+    item = upsert_item(db, user_id=uid, name="Coffee", category="Beverages")
+    record_purchase(db, user_id=uid, item=item, purchased_at=utcnow() - timedelta(days=300),
+                    source="email", source_ref="old")
+    db.commit()
+
+    parsed = {"action_type": "grocery_basket", "grocery_items": ["coffee"], "say": "",
+              "screen": "", "draft_id": "", "message_id": "", "reply_body": "",
+              "to_addr": "", "subject": "", "profile_json": "", "mute_kind": "",
+              "mute_sender": "", "priority_kind": "", "priority_sender": "",
+              "listen": False}
+    override = _execute(db, uid, parsed)
+    assert override["action"] == "open_screen" and override["screen"] == "grocery"
+    assert override.get("acted") is True
+
+    # Replay exactly what the endpoint does with the override.
+    if override.get("say"):
+        parsed["say"] = override["say"]
+    if override.get("action"):
+        parsed["action_type"] = override["action"]
+    if override.get("screen"):
+        parsed["screen"] = override["screen"]
+    acted = bool(override.get("acted")) or parsed["action_type"] in ("send_draft",)
+
+    assert parsed["action_type"] == "open_screen", "the client navigates on this"
+    assert parsed["screen"] == "grocery"
+    assert acted is True, "building a basket is something that happened"
+    db.close()
+
+
+def test_numbers_in_a_product_name_are_identity_not_noise():
+    """Stripping every bare number merged different dosages into one shelf item
+    with interleaved history — the same corruption as merging 1% and 2% milk."""
+    from superapp.substrate.grocery import slugify
+
+    assert slugify("Vitamin D3 2000 IU") != slugify("Vitamin D3 5000 IU")
+    assert slugify("Advil 200mg") != slugify("Advil 500mg")
+    assert slugify("7 Up") != slugify("5 Gum")
+
+    # Sizes still merge, because a size is not identity.
+    assert slugify("Milk 8 oz") == slugify("Milk 1 Gal")
+    assert slugify("Doritos Cool Ranch 9.25oz") == slugify("DORITOS COOL RANCH")
+    # A receipt lot code is not a name.
+    assert slugify("Whole Milk 4829173") == slugify("Whole Milk")
+
+
+def test_the_shelf_does_not_query_once_per_item():
+    """grocery_context runs on every screen load. One query per item cost 63
+    queries for a 60-item shelf."""
+    import string
+
+    from sqlalchemy import event
+
+    from superapp.db import engine
+    from superapp.models import utcnow
+    from superapp.substrate.grocery import grocery_context, record_purchase, upsert_item
+
+    db = SessionLocal()
+    uid = "g-perf"
+    names = [f"{a}{b} cereal" for a in string.ascii_lowercase[:6]
+             for b in string.ascii_lowercase[:6]][:30]
+    for i, nm in enumerate(names):
+        it = upsert_item(db, user_id=uid, name=nm, category="Snacks")
+        record_purchase(db, user_id=uid, item=it, purchased_at=utcnow(),
+                        source="email", source_ref=f"r{i}")
+    db.commit()
+
+    count = []
+    def _seen(conn, cur, stmt, params, ctx, many):
+        count.append(1)
+    event.listen(engine, "before_cursor_execute", _seen)
+    try:
+        state = grocery_context(db, uid)
+    finally:
+        event.remove(engine, "before_cursor_execute", _seen)
+
+    assert state["item_count"] == 30, "distinct products must not collapse"
+    assert len(count) <= 6, f"one query per item is back: {len(count)} queries for 30 items"
+    db.close()
+
+
+def test_a_handoff_link_is_stored_whole(monkeypatch):
+    """Half a URL is a dead link the person would tap."""
+    import superapp.grocery.providers as providers
+    from superapp.models import GroceryOrder
+
+    long_url = "https://www.instacart.com/store/partner_recipe?" + "t=" + ("x" * 200)
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"products_link_url": long_url}
+
+    from superapp.config import get_settings
+
+    monkeypatch.setattr(providers.httpx, "post", lambda *a, **k: _Resp())
+    settings = get_settings()
+    prev = settings.instacart_api_key
+    settings.instacart_api_key = "test-key"
+
+    db = SessionLocal()
+    o = GroceryOrder(user_id="harshith", platform="instacart",
+                     lines=[{"item_id": "x", "name": "Milk", "quantity": 1}])
+    db.add(o); db.commit(); oid = o.id; db.close()
+
+    try:
+        r = client.post(f"/v1/grocery/orders/{oid}/handoff", headers=AUTH)
+    finally:
+        settings.instacart_api_key = prev
+    assert r.status_code == 200, r.text
+    assert r.json()["url"] == long_url
+
+    db = SessionLocal()
+    stored = db.get(GroceryOrder, oid).external_id
+    db.close()
+    assert stored == long_url, f"stored {len(stored)} of {len(long_url)} characters"
+
+
+def test_placing_an_order_records_the_tier_three_decision():
+    """The gate here used to compute a verdict and discard it — code that read
+    like a check and enforced nothing. The authorisation is the confirmation;
+    what belongs here is the ledger entry."""
+    from superapp.models import Decision
+
+    order = _basket("ledger")
+    client.post(f"/v1/grocery/orders/{order['id']}/confirm", headers=AUTH,
+                json={"fingerprint": order["fingerprint"]})
+    client.post(f"/v1/grocery/orders/{order['id']}/place", headers=AUTH)
+
+    db = SessionLocal()
+    rows = db.scalars(select(Decision).where(
+        Decision.user_id == "harshith",
+        Decision.action_key == "grocery.place_order")).all()
+    db.close()
+    assert rows, "a tier-3 act must leave a ledger entry"
+    assert any(r.payload.get("risk_tier") == 3 for r in rows)
+    assert all(r.decided_by == "user" for r in rows)

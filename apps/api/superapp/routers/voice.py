@@ -456,7 +456,7 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
             db.commit()
             return {"say": f"Basket has {said}.{tail} Have a look and confirm — "
                            f"I won't order anything until you do.",
-                    "action": "open_screen", "screen": "grocery"}
+                    "action": "open_screen", "screen": "grocery", "acted": True}
         order = propose_basket(db, user_id, reason="you asked me to do the shop")
         if order is None:
             db.commit()
@@ -465,7 +465,7 @@ def _execute(db: Session, user_id: str, parsed: dict) -> dict:
         n = len(order.lines or [])
         return {"say": f"I put {n} thing{'s' if n != 1 else ''} in the basket — "
                        f"{order.reason}. Confirm it and I'll hand it over.",
-                "action": "open_screen", "screen": "grocery"}
+                "action": "open_screen", "screen": "grocery", "acted": True}
 
     if action == "mute_mail":
         # "Don't show me Amazon shipping updates" / "nothing from this sender".
@@ -813,6 +813,15 @@ def converse(body: ConverseBody, user_id: str = Depends(current_user_id),
     if override.get("say"):
         parsed["say"] = override["say"]
         parsed["listen"] = True
+    # An action that has somewhere to send the person says so. This used to read
+    # only "say" and silently discard the rest, so Nano would announce a basket
+    # it had just built and leave the app sitting on the same screen. The client
+    # navigates on action == "open_screen" with a screen name; both have to
+    # survive the trip.
+    if override.get("action"):
+        parsed["action_type"] = override["action"]
+    if override.get("screen"):
+        parsed["screen"] = override["screen"]
 
     append_event(db, user_id=user_id, type="voice_command", agent="orb",
                  payload={"heard": body.messages[-1].text[:200],
@@ -828,9 +837,11 @@ def converse(body: ConverseBody, user_id: str = Depends(current_user_id),
     return {
         "say": parsed["say"], "action": parsed["action_type"],
         "screen": parsed.get("screen", ""), "listen": parsed.get("listen", False),
-        "acted": parsed["action_type"] in ("draft_reply", "send_draft", "send_new_email",
-                                           "set_nutrition", "log_water", "auto_reply_rule",
-                                           "mute_mail", "priority_mail"),
+        # An override that changed the world says so itself; overwriting
+        # action_type for navigation must not erase the fact that it acted.
+        "acted": bool(override.get("acted")) or parsed["action_type"] in (
+            "draft_reply", "send_draft", "send_new_email", "set_nutrition",
+            "log_water", "auto_reply_rule", "mute_mail", "priority_mail"),
     }
 
 

@@ -220,6 +220,10 @@ def propose_basket(db: Session, user_id: str, *, platform: str = "list",
     wanted = data["out_of_stock"] + data["running_low"]
     if not wanted:
         return None
+    # Things the person marked "always keep in" lead the basket, so a staple
+    # is never the line they scroll past. Until now `pinned` was stored and
+    # never read by anything.
+    wanted.sort(key=lambda s: not s.get("pinned"))
     lines = [{"item_id": s["id"], "name": s["name"], "quantity": 1,
               "unit": s["unit"], "note": s["reason"]} for s in wanted]
 

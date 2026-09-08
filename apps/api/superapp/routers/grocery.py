@@ -307,7 +307,9 @@ def handoff_order(order_id: str, user_id: str = Depends(current_user_id),
         raise HTTPException(status_code=422, detail=str(exc))
 
     o.status = "handed_off"
-    o.external_id = (result.get("url") or "")[:120]
+    # Not truncated: this is a URL, and half a URL is a dead link the person
+    # would tap. The column was widened in 0022 for exactly this.
+    o.external_id = result.get("url") or ""
     append_event(db, user_id=user_id, type="grocery_basket_handed_off", agent="grocery",
                  domain="grocery", payload={"order_id": o.id, "platform": o.platform,
                                             "lines": len(o.lines or [])})
@@ -332,13 +334,20 @@ def place_order(order_id: str, user_id: str = Depends(current_user_id),
     if o.status != "confirmed":
         raise HTTPException(status_code=409, detail=f"This order is {o.status}.")
 
-    # 2. Money is tier 3: no autonomous provenance clears it, and the person's
-    #    own tap is the only thing that gets this far.
-    gate = assess("grocery.place_order", provenance="user")
-    if not gate.allowed and gate.tier >= 3:
-        # Tier 3 refuses every provenance by design. The user's tap is what
-        # authorises this route at all; the gate is recorded, not bypassed.
-        pass
+    # 2. Money is tier 3, which means NO autonomous path may reach this code.
+    #    That is enforced by there being no caller other than this route, and
+    #    this route requiring the confirmation checked above.
+    #
+    #    An earlier version called assess() here and then did nothing with the
+    #    verdict — a few lines that read like a security check and enforced
+    #    nothing, which is worse than not having them. The check is recorded
+    #    instead, so the ledger shows a human authorised a tier-3 act.
+    record_decision(db, user_id=user_id, agent="grocery",
+                    action_key="grocery.place_order", decided_by="user",
+                    verdict="acted",
+                    payload={"order_id": o.id, "platform": o.platform,
+                             "risk_tier": assess("grocery.place_order",
+                                                 provenance="user").tier})
 
     # 3. The platform must be able to do it, and say so if it cannot.
     try:
