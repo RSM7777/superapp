@@ -2,45 +2,27 @@
 
 _Every architectural decision, in plain language. Generated from the design phase; the same source as the shareable page._
 
-Nano becomes one agent you talk to, built in Muse's shape and running inside the FastAPI + Postgres body you already have. The spine is V2's: a single agent loop with a persistent thread, a folder of plain Markdown it keeps about you (SOUL, IDENTITY, USER, MEMORY, people, a daily log), skills as plain-English playbooks, a durable scheduler whose results land in the thread, subagents for parallel errands, and approval cards rendered outside the model's reach. Underneath, V1's discipline is installed at every seam where Muse is thin: every model call goes through V1's metered, cached provider; every tool call passes one authorize() check built from V1's risk tiers and backstops; memory writes go through one validated, secret-guarded, archived door; the inbox keeps its code-computed triage and a send tool that only accepts a vetted draft id; Postgres migrations and the 141 tests stay the regression net. Your months of UI survive as the card language and the tabs: the thread is home, V1's SDUI blocks ride the same WebSocket as cards with ids, and Hub, Inbox, Today (CalScreen), Me (Profile + Connectors + Memory), BriefPlayer and the NanoOrb sit around the thread fed by the same substrate the agent reads. Six buildable phases on the "consolidated" branch, each leaving the tests green; three decisions only you can make (which model, earned vs always-ask autonomy, which embedding model), none of which blocks the first two phases from running in stub mode.
+Nano becomes one agent you talk to, built in Muse's shape and running inside the FastAPI + Postgres body you already have. The spine is V2's: a single agent loop with a persistent thread, a folder of plain Markdown it keeps about you (SOUL, IDENTITY, USER, MEMORY, people, a daily log), skills as plain-English playbooks, a durable scheduler whose results land in the thread, subagents for parallel errands, and approval cards rendered outside the model's reach. Underneath, V1's discipline is installed at every seam where Muse is thin: every model call goes through V1's metered, cached provider; every tool call passes one authorize() check built from V1's risk tiers and backstops; memory writes go through one validated, secret-guarded, archived door; the inbox keeps its code-computed triage and a send tool that only accepts a vetted draft id; Postgres migrations and the 141 tests stay the regression net. Your months of UI survive as the card language and the tabs: the thread is home, V1's SDUI blocks ride the same WebSocket as cards with ids, and Hub, Inbox, Today (CalScreen), Me (Profile + Connectors + Memory), BriefPlayer and the NanoOrb sit around the thread fed by the same substrate the agent reads. Six buildable phases, in order 1 to 6, on the "consolidated" branch, each leaving the tests green; the three open decisions are made: Claude, always-ask by default with earned autonomy as an opt-in, local embeddings. It may launch outside, so every phase ships safe for strangers and is reviewed like a release.
 
 ## The verdict in one paragraph
 
 **Muse's shape, V1's discipline.** Muse is a general agent with a folder of memory files, skills as playbooks, a scheduler and a chat with cards. That skeleton is right. But V2's port enforces almost nothing at its seams: tool permissions are advisory, memory writes have no guard, the model's shell inherits the vault key, there is no cost metering, and zero tests. V1 has exactly those organs. So this is Muse's skeleton with V1's organs, and V1's UI as the card language inside the thread.
 
-## Three decisions only you can make
+## The three decisions, made
 
 ### Which model runs Nano's brain? You have no API key for either today, so phases 1-2 run in stub mode until you answer.
 
-_Blocks phase 1._
-
-1. A) Anthropic Claude through V1's provider: Opus 5 for chat with adaptive thinking, Sonnet 5 for helpers, Haiku 4.5 for triage and memory flush; keeps structured JSON output, prompt caching, batch pricing, refusal fallbacks and cost metering; the loop is ported to Claude's tool-use streaming. Your data goes to Anthropic.
-2. B) Meta muse-spark via its OpenAI-compatible endpoint: closest to the Muse you used; we build a second backend and replace four server-side guarantees with client-side validation and retries. Your data goes to Meta, which is what you are leaving.
-3. C) Qwen3.8-27B, open weights (Apache 2.0, 262k context, strong on agent benchmarks), through the same second backend: HOSTED (Alibaba, Together, Fireworks, OpenRouter): fast and cheaper than Claude, but your data goes to that host, the same privacy shape as A. LOCAL on your M1 Pro 32GB via Ollama: nothing leaves your machines, but about 6-10 words a second and minutes per chat turn, and the Mac must stay on. The Hostinger VM has no GPU, so local Qwen cannot run there at chat speed.
-4. D) Hybrid (recommended): Claude for the conversation and drafting, where judgment and speed matter and every V1 test already runs; Qwen3.8 for the background jobs that touch the most raw data (triage classification, memory-flush extraction, learnings proposals, receipt reading), local on the Mac if it stays on, else hosted. The per-role routing already in the plan makes this a config choice; the second backend is the same ~400 lines as B or C.
-
-**Recommendation:** D, with A alone as the simplest start. The chat brain needs speed and judgment; a 27B model on an M1 Pro gives neither at chat speed, and a hosted one has the same privacy shape as Claude. But the background jobs are where most of your raw mail passes through, they are not latency-sensitive, and a local model there means the bulk of your inbox is never sent anywhere. Start on A so phase 1 runs on tested code; add the second backend when phase 2's inbox job lands and route it to Qwen then. If the feel is wrong on Claude, C-hosted is a bounded switch behind the same door.
+**Answer:** Claude through V1's provider for phase 1; the second backend (for Qwen on background jobs) lands in phase 2 as planned.
 
 ### Should Nano earn autonomy over time, or always ask like Muse?
 
-_Blocks phase 2._
-
-1. A) Earned: keep V1's decision ledger; after roughly 20 clean decisions Nano offers to stop asking for reply-to-sender emails and archiving; one cancel demotes it; money, new recipients and anything caused by an email always ask; promotion is a manual tap on the Me tab.
-2. B) Always ask: every send and every change needs a tap forever; we delete the ladder, autonomy_grants and the promote/demote code; the 60-second auto-reply countdown for rules you wrote can stay or go with it.
-
-**Recommendation:** A. The ledger and hard caps already exist and are tested, the countdown card is the only default-allow path either way, and it is one of the few things that gets better than Muse the longer you use it. Choose B only if you never want Nano to act without a tap.
+**Answer:** Always-ask is the default for every new user; earned autonomy is a per-user opt-in on the Me tab. Decided by the launch-outside requirement: strangers get the safe default, Rohit can turn on earning for himself.
 
 ### Which embedding model should power memory search? Nothing blocks until phase 4: search runs keyword-only with an honest 'degraded' flag until then.
 
-_Blocks phase 4._
+**Answer:** Local MiniLM (what Muse uses), so a deployment needs no embedding key.
 
-1. A) Local fastembed MiniLM (384 dims): free, no key, about 100 MB of onnxruntime in the API process, one migration to change the vector width.
-2. B) Keep Voyage voyage-3.5-lite (1024 dims): what V1 uses today, cents per month at your volume, needs a key and network, already wired and tested.
-3. C) Both selectable in config.
-
-**Recommendation:** A for a personal project: no key to manage, no network dependency for memory, and the store, provenance and scoping are what matter; swapping later is one function plus one migration.
-
-## All 42 decisions
+## All 44 decisions
 
 ### 1. Core loop · phase 1 · large
 
@@ -62,7 +44,7 @@ _Blocks phase 4._
 
 **Beats Muse:** Compaction cannot corrupt itself, and the hourly flush writes what it learned into MEMORY.md through the guarded write tool with an archive trail.
 
-### 3. Provider · phase 1 · medium — **you decide**
+### 3. Provider · phase 1 · medium
 
 **Do:** Make V1's LLMProvider the only door to any model, add a streaming tool-use call for the loop, and (recommended) run on Anthropic; if you choose Meta's muse-spark endpoint we add a second backend behind the same door.
 
@@ -72,7 +54,7 @@ _Blocks phase 4._
 
 **Beats Muse:** Every role's every round has a cost line; triage and drafting get schema-valid JSON without retries; tests run with no key.
 
-**The question:** Which model runs Nano's brain? A) Anthropic Claude through V1's provider (recommended): Opus 5 for chat with adaptive thinking, Sonnet 5 for subagents, Haiku 4.5 for triage and memory flush; keeps structured output, prompt caching, batch pricing, refusal fallbacks and cost metering, and the loop is ported to Claude's tool-use streaming. B) Meta muse-spark via its OpenAI-compatible endpoint: closest to the Muse you used, but we build a second backend and replace four server-side guarantees (JSON-schema output, cache breakpoints, batches, refusal fallback) with client-side validation and retries, and cost depends on the endpoint reporting usage. C) Both behind one switch (roughly 400 extra lines) so you can A/B the same conversation. You have no key for either today; phases 1-2 run in stub mode until you answer.
+_DECIDED: Claude through V1's provider for phase 1; the second backend (for Qwen on background jobs) lands in phase 2 as planned._
 
 ### 4. Cost and observability · phase 1 · small
 
@@ -154,7 +136,7 @@ _Blocks phase 4._
 
 **Beats Muse:** Muse blocks every send on a tap; Nano can auto-reply to Priya after 60 seconds because you wrote that rule, and you can cancel from the card or lock screen.
 
-### 12. Autonomy ladder · phase 2 · small — **you decide**
+### 12. Autonomy ladder · phase 2 · small
 
 **Do:** Decide whether Nano earns silence over time (V1's ledger: after a run of clean decisions it offers to stop asking for reply-to-sender emails and archiving, one undo demotes it) or always asks like Muse.
 
@@ -164,7 +146,7 @@ _Blocks phase 4._
 
 **Beats Muse:** Fewer taps as the ledger fills, with a visible 'Without asking' panel showing exactly what Nano is trusted to do.
 
-**The question:** Should Nano earn autonomy (recommended: after ~20 clean decisions it offers to stop asking for reply-to-sender emails and archiving; one cancel demotes it; money and new recipients always ask) or always ask like Muse (every send and change needs a tap forever; simpler, and we delete the ladder and autonomy_grants table)?
+_DECIDED: Always-ask is the default for every new user; earned autonomy is a per-user opt-in on the Me tab. Decided by the launch-outside requirement: strangers get the safe default, Rohit can turn on earning for himself._
 
 ### 13. Scheduling · phase 2 · medium
 
@@ -274,7 +256,7 @@ _Blocks phase 4._
 
 **Beats Muse:** Three things Muse's own schema allows and its ranking never uses. Importance is not frozen at write time: a memory that keeps being used in replies moves up and one that is surfaced and ignored does not, a learning-to-rank signal Muse says it cannot see whether it has, and we get for free from the turn log. Decay is per kind, so a preference fades over years, a state in days, and a commitment expires on its own date, instead of one 90-day half-life for everything. A superseded fact is not hidden but returned with what replaced it and when. Plus: every recalled line says who said it, where and when; a degraded index lowers autonomy instead of pretending; memory.explain shows the full receipt for any hit.
 
-### 24. Retrieval: embedding model · phase 4 · small — **you decide**
+### 24. Retrieval: embedding model · phase 4 · small
 
 **Do:** Choose the model that turns text into searchable vectors: a free local one (recommended) or the hosted Voyage model V1 uses today; nothing blocks until phase 4 because the store already runs keyword-only with an honest degraded flag.
 
@@ -284,7 +266,7 @@ _Blocks phase 4._
 
 **Beats Muse:** No API key for memory, and provenance on every hit.
 
-**The question:** Which embedding model should power memory search? A) Local fastembed MiniLM, 384 dims, free, no key, ~100 MB dependency in the API process, one migration to change the vector width (recommended for a personal project). B) Keep Voyage voyage-3.5-lite (1024 dims, what V1 uses today, cents per month, needs a key and network). C) Both selectable in config. Until you answer, search runs keyword-only and Nano knows its recall is degraded.
+_DECIDED: Local MiniLM (what Muse uses), so a deployment needs no embedding key._
 
 ### 25. Data · phase 1 · small
 
@@ -322,7 +304,7 @@ _Blocks phase 4._
 
 **Why:** The regression net is the reason the consolidation can be done in phases at all, and test_spine exercises every endpoint we retire (voice/converse, telegram, orchestrator/think, tasks, interview). Naming the disposition per test is what makes 'green at every phase' checkable.
 
-### 29. Dead weight · phase 5 · small
+### 29. Dead weight · phase 6 · small
 
 **Do:** A final phase deletes every module the new spine made redundant (orchestrator, hub agent, dispatcher, scout, realtime, the old voice brain, dead screens) with a cleanup migration, so the backend ends up smaller than the 13.5k lines it is today.
 
@@ -380,7 +362,7 @@ _Blocks phase 4._
 
 **Beats Muse:** Built on records with provenance (mail history, sent replies) rather than on prose the model wrote about itself.
 
-### 35. Proactive engine: goals, cards, follow-ups · phase 6 · large
+### 35. Proactive engine: goals, cards, follow-ups · phase 5 · large
 
 **Do:** Nano pursues your goals in the background: each goal is an objective with its own state; scheduled runs produce cards (a spending calculation with its inputs and formula, a calibration of a prediction it made); and a selector decides whether a follow-up is worth surfacing to you at all.
 
@@ -458,13 +440,33 @@ _Blocks phase 4._
 
 **Beats Muse:** Muse runs you inside Meta's container on Meta's machines. This runs on yours, and a backup of it is yours too.
 
-## Six build phases
+### 43. Built to launch: safe for strangers by construction · phase 1 · medium
+
+**Do:** Every phase ships multi-user-safe: every row is keyed by user; no process-wide state exists without a user key (the retriever, subagent pools, approvals, live browser sessions); each user has their own home folder, vault namespace, browser profile and scheduler rooms; a test proves two users cannot see each other's memory, approvals, messages, jobs or files. Sign-in is an invite list in config rather than a hardcoded address. 'Forget me entirely' deletes the home folder, every row, the vault entries and the index, and is tested. New users start at always-ask.
+
+**Replaces:** The 'one user, maybe two' assumptions: a hardcoded sign-in allowlist, per-process caches, and the deferred decision on account deletion.
+
+**Why:** This may launch outside. The synthesis found cross-tenant leaks in both codebases (V1's shared browser profile and server-wide login link; V2's cross-user retriever and process-global spawn registries), all already dropped by the plan, and the way to keep them out is a rule with a test rather than vigilance: no global keyed without a user, and a two-user isolation test that runs on every change. Deletion is not optional for a product other people use.
+
+**Beats Muse:** Muse gets isolation from one container per person. We get it from construction and a test, on one process, and we can still add containers later if scale ever demands it.
+
+### 44. Quality bar: every phase is reviewed like a release · phase 1 · medium
+
+**Do:** No phase is done on green tests alone. Each ends with an adversarial review of its whole diff by independent reviewers (correctness, security at the seams, product against the phase's own 'done when'), every confirmed finding fixed, a restart-survival check, the two-user isolation test, and a walkthrough of the app on the simulator with screenshots kept in the repo.
+
+**Replaces:** The earlier plan's 'tests green' as the bar; the design's adversarial pass that never ran.
+
+**Why:** The bar is Muse's polish and reliability or better, for people who are not the author. The grocery PR needed two review rounds after its tests were green because five bugs lived in paths the tests never ran; that is the failure mode a release bar prevents.
+
+**Beats Muse:** Muse's reliability lives in Meta's QA. Ours lives in the repo, reproducible on every change.
+
+## Six build phases, in order
 
 ### Phase 1: Spine: one agent you can talk to
 
 Land the general loop, the tool registry with authorize() and persisted approvals, the home-directory memory, our own prompt manifest, the provider's streaming tool-use call with correct prices and a cost cap, and a Chat tab in the app, without touching any existing router, screen or test.
 
-**Done when:** pytest passes (141 old plus the new files); a user can open the Chat tab, ask 'what is in my inbox and what did I eat today', watch the agent call inbox.context and nutrition.today, and get text plus a rendered block card; a gated tool produces an approval row and a card, and the decision appears in the ledger; telling Nano something about yourself changes USER.md with an archive event; the assembled system prompt is byte-identical across rounds within a turn and llm_call events show cache_read tokens on the second round when a key is present; no test subprocess sees ANTHROPIC_API_KEY or SUPERAPP_VAULT_KEY.
+**Done when:** pytest passes (141 old plus the new files); a user can open the Chat tab, ask 'what is in my inbox and what did I eat today', watch the agent call inbox.context and nutrition.today, and get text plus a rendered block card; a gated tool produces an approval row and a card, and the decision appears in the ledger; telling Nano something about yourself changes USER.md with an archive event; the assembled system prompt is byte-identical across rounds within a turn and llm_call events show cache_read tokens on the second round when a key is present; no test subprocess sees ANTHROPIC_API_KEY or SUPERAPP_VAULT_KEY. Release bar: an adversarial review of the phase's diff with no open findings; a restart mid-run loses nothing; test_isolation.py green; a simulator walkthrough with screenshots committed under docs/walkthroughs/.
 
 - **[M] [adapt from V1]** P1.1 Provider: add LLMProvider.stream_tools() (Messages streaming tool_use with delta accumulation lifted from V2 loop.py:196-232), per-role routing (model_chat=claude-opus-5 adaptive thinking, model_worker=claude-sonnet-5, model_routing=claude-haiku-4-5), family-based price lookup with claude-sonnet-5 corrected to $2/$10, server-side compaction opt-in (beta compact-2026-01-12) returning compaction blocks, server-side refusal fallbacks, llm_call events per round, a daily cost counter, and a scripted tool-call stub mode for tests; complete()/complete_batch() untouched
   - `apps/api/superapp/llm/provider.py`
@@ -539,12 +541,16 @@ Land the general loop, the tool registry with authorize() and persisted approval
   - `apps/api/superapp/substrate/nutrition.py`
   - `apps/api/superapp/substrate/inbox.py`
   - `apps/api/superapp/memory/home.py`
+- **[M] [new]** P1.14 Multi-user isolation: audit for process-global state (retriever, pools, approvals, sessions, event ring) and key or remove each; per-user home/vault namespace/rooms; invite-list sign-in from settings; test_isolation.py creates two users and asserts neither can read the other's memory, approvals, messages, jobs, files or search hits, through the API and through the tools _(after P1.2, P1.4, P1.5)_
+  - `apps/api/superapp/agent/room.py`
+  - `apps/api/superapp/auth.py`
+  - `apps/api/tests/test_isolation.py`
 
 ### Phase 2: Inbox becomes a skill; consent and background work go durable
 
 Port the scheduler, move the auto-send window onto persisted approvals with a deadline job, decompose the inbox pipeline into a code job plus loop tools, and route voice, Telegram and WhatsApp through the loop so the ungated executors disappear.
 
-**Done when:** pytest green with the named test_spine rewrites; inbox-sync runs as a scheduled job and its summary appears as a handoff in the thread; 'reply to Sarah saying yes to Thursday' produces a draft card and a tap sends it; a matched auto-reply rule produces a countdown card that sends at the deadline only when every gate passes and a restart mid-window neither loses nor double-sends it; the voice orb cannot send to an address the policy would deny; grep finds no threading.Timer, rearm_all or _execute in the backend and the crontab section is gone from deploy/DEPLOY.md.
+**Done when:** pytest green with the named test_spine rewrites; inbox-sync runs as a scheduled job and its summary appears as a handoff in the thread; 'reply to Sarah saying yes to Thursday' produces a draft card and a tap sends it; a matched auto-reply rule produces a countdown card that sends at the deadline only when every gate passes and a restart mid-window neither loses nor double-sends it; the voice orb cannot send to an address the policy would deny; grep finds no threading.Timer, rearm_all or _execute in the backend and the crontab section is gone from deploy/DEPLOY.md. Release bar: an adversarial review of the phase's diff with no open findings; a restart mid-run loses nothing; test_isolation.py green; a simulator walkthrough with screenshots committed under docs/walkthroughs/.
 
 - **[L] [port from V2]** P2.1 Scheduler engine as Postgres rows only (no Markdown job mirror, no bash hooks): scheduler_jobs and scheduler_runs with UNIQUE(job_id, scheduled_for_utc) claim, two job kinds (agent prompt via scheduler_worker role, Python callable), separate pools with cooperative cancellation, results delivered as handoffs, nothing_to_do silent turns, restart-recovery note; cron.add/list/remove tools; a single background thread started in lifespan; Alembic 0029 _(after P1.2)_
   - `apps/api/superapp/scheduler/engine.py`
@@ -603,7 +609,7 @@ Port the scheduler, move the auto-send window onto persisted approvals with a de
 
 Turn every remaining vertical into tools plus a SKILL.md, dissolve the orchestrator into scheduler jobs, add subagents and onboarding, and make the app's home the thread with the Hub / Chat / Inbox / Today / Me tab map, retiring the think endpoints and their registries.
 
-**Done when:** pytest green with the named test_spine rewrites; the app opens on the thread; every tab renders from REST without a model call and grep finds no setInterval network poll in App.tsx or the screens; 'what should I eat tonight given the fridge and my budget' composes nutrition, grocery and finance tools in one turn; a fresh install walks the three-step form and gets a greeting; nightly reflection, decay and the morning brief run from the scheduler and appear in the Activity sheet with cost; 'find me three quotes for X' spawns subagents whose reports arrive as list cards.
+**Done when:** pytest green with the named test_spine rewrites; the app opens on the thread; every tab renders from REST without a model call and grep finds no setInterval network poll in App.tsx or the screens; 'what should I eat tonight given the fridge and my budget' composes nutrition, grocery and finance tools in one turn; a fresh install walks the three-step form and gets a greeting; nightly reflection, decay and the morning brief run from the scheduler and appear in the Activity sheet with cost; 'find me three quotes for X' spawns subagents whose reports arrive as list cards. Release bar: an adversarial review of the phase's diff with no open findings; a restart mid-run loses nothing; test_isolation.py green; a simulator walkthrough with screenshots committed under docs/walkthroughs/.
 
 - **[L] [adapt from V1]** P3.1 Vertical tools wrapping existing think() steps and loaders with their schemas, routing and fallbacks: nutrition.log_meal/estimate(multimodal)/today/plan, grocery.forecast(pure)/read_receipt/build_basket(tier 0)/place_order(tier 3, fingerprint-bound confirm card), finance.summary/transactions/sync (move_money tier 3 never), wardrobe.context and stylist.suggest, people.lookup/upsert (LLM merge kept), flights.watch/tick; render() bodies become screen builders _(after P1.3, P2.4)_
   - `apps/api/superapp/tools/nutrition_tools.py`
@@ -680,7 +686,7 @@ Turn every remaining vertical into tools plus a SKILL.md, dissolve the orchestra
 
 Bring retrieval up to the merged spec on the embedding model you chose, add the jailed workspace and helper-only exec, port the browser worker with deterministic gates, and make the container boot correctly on its own.
 
-**Done when:** pytest green plus scripts/check_release_postgres.py; memory.search returns citations from notes, curated files and selected mail with provenance, and passes with no embedding key set; a subagent can run a script in the workspace with no secret in its environment; a browser errand pauses on a payment field for a tier-3 card and a site login shows a credential card; the container boots with migrations applied, one worker and no crontab.
+**Done when:** pytest green plus scripts/check_release_postgres.py; memory.search returns citations from notes, curated files and selected mail with provenance, and passes with no embedding key set; a subagent can run a script in the workspace with no secret in its environment; a browser errand pauses on a payment field for a tier-3 card and a site login shows a credential card; the container boots with migrations applied, one worker and no crontab. Release bar: an adversarial review of the phase's diff with no open findings; a restart mid-run loses nothing; test_isolation.py green; a simulator walkthrough with screenshots committed under docs/walkthroughs/.
 
 - **[M] [adapt from V1]** P4.1 Retrieval: index the home-directory Markdown into memory_chunks (kind=home, ref=path, line span) so memory.search returns path#Lnn citations; selective mail indexing (needs_reply/worth_knowing, sent replies with author and source_ref, drafted threads, imported knowledge) and no bulk import of raw bodies; fix thread-id keying; per-source degraded flag; optional cross-encoder rerank stage behind a flag; embedder per the user's decision (Alembic 0031 changes the vector width and re-embeds if local); check_release_postgres.py extended; ranking = fused match score + salience prior (0.15, from the inline [kind|salience] tag) + recency prior (0.1, 90-day half-life over reinforced_at, not created_at) + cross-encoder rerank of the top 20; a min_score floor; the search tool accepts one to three phrasings and unions them; all weights in config, defaults from Muse's home.yaml _(after P1.5, P2.3)_
   - `apps/api/superapp/memory.py`
@@ -714,14 +720,42 @@ Bring retrieval up to the merged spec on the embedding model you chose, add the 
   - `apps/api/tests/test_exec_env.py`
   - `apps/api/tests/test_browser_gate.py`
   - `apps/api/tests/test_migrations.py`
+- **[S] [new]** P4.6 Forget me entirely: POST /v1/account/delete (phone session, typed confirmation) removes the home folder, every row for the user across all tables, vault entries, memory index rows and scheduled jobs; a job that verifies nothing remains; tested _(after P1.14)_
+  - `apps/api/superapp/routers/account.py`
+  - `apps/api/tests/test_account_delete.py`
 
-### Phase 5: Delete the dead weight (runs last, after phase 6)
+### Phase 5: Proactive: goals, cards, follow-ups (design pass first)
+
+Give Nano the layer Muse markets and we lack: it pursues your goals in the background, computes cards you can check, and decides for itself whether a follow-up is worth your attention. The logic is not in any archive, so this phase opens with a design pass (competing proposals, judged) before any code.
+
+**Done when:** A goal captured in chat becomes an objective with state; a scheduled run produces a card whose inputs and formula are visible on tap; a follow-up reaches the thread only when the selector says so and the cost cap allows; the same follow-up is never surfaced twice (dedupe); a run that dies mid-way is recovered by lease expiry; every proactive action appears in the ledger with its cost. Release bar: an adversarial review of the phase's diff with no open findings; a restart mid-run loses nothing; test_isolation.py green; a simulator walkthrough with screenshots committed under docs/walkthroughs/.
+
+- **[M] [new]** P5.0 Design pass: four proposals (goal-first, card-first, follow-up-first, simplest) judged and synthesised into the concrete objective/card/selector model, before build _(after P3.11)_
+  - `docs/CONSOLIDATION.md`
+- **[M] [new]** P5.1 Objectives: table (objective_id, title, state_json, status, markers) and goals.capture / goals.list / goals.update tools; goal capture from chat writes an objective, not a Markdown line _(after P5.0)_
+  - `apps/api/superapp/tools/goals_tools.py`
+  - `apps/api/alembic/versions/0033_objectives.py`
+- **[M] [port from V2]** P5.2 Objective runs on the scheduler with leases (lease_key, owner, expires_at, heartbeat) so a dead run is reclaimed, and handoff dedupe by content hash so the same result is never surfaced twice _(after P5.1, P2.1)_
+  - `apps/api/superapp/scheduler/engine.py`
+  - `apps/api/superapp/scheduler/jobs.py`
+- **[L] [new]** P5.3 Cards with receipts: calculation_records (inputs, formula, outputs, code version) and calibration_records (a prediction, its window, how it landed); rendered as SDUI cards whose detail shows the inputs and formula _(after P5.2)_
+  - `apps/api/superapp/proactive/cards.py`
+  - `apps/api/superapp/sdui/blocks.py`
+- **[M] [new]** P5.4 Follow-up selector: a scheduled job that scores candidate follow-ups (priority, staleness, last surfaced) and emits at most N per day through authorize() and the cost cap; every decision recorded _(after P5.2, P1.3)_
+  - `apps/api/superapp/proactive/selector.py`
+  - `apps/api/superapp/tools/authorize.py`
+- **[M] [new]** P5.5 Goals tab in the app over /v1/goals, and proactive cards in the thread and on the Hub; tests: test_objectives.py, test_selector.py (never twice, never over cap, never ungated) _(after P5.3, P5.4)_
+  - `apps/mobile/src/GoalsScreen.tsx`
+  - `apps/api/tests/test_objectives.py`
+  - `apps/api/tests/test_selector.py`
+
+### Phase 6: Delete the dead weight (runs last)
 
 Remove every module the new spine made redundant, drop the tables nothing reads, fix the SDUI toolchain, and rewrite the architecture doc, so the backend is smaller than the 13.5k lines it is today and boots correctly on its own.
 
-**Done when:** pytest green; a fresh container boots with migrations applied and no create_all; grep finds no reference to crontab, scout, Outlook, ElevenLabs, LiveKit, threading.Timer or SCREEN_AGENTS; export_sdui_schema.py --check passes in CI; the backend package is materially smaller than 13.5k lines.
+**Done when:** pytest green; a fresh container boots with migrations applied and no create_all; grep finds no reference to crontab, scout, Outlook, ElevenLabs, LiveKit, threading.Timer or SCREEN_AGENTS; export_sdui_schema.py --check passes in CI; the backend package is materially smaller than 13.5k lines. Release bar: an adversarial review of the phase's diff with no open findings; a restart mid-run loses nothing; test_isolation.py green; a simulator walkthrough with screenshots committed under docs/walkthroughs/.
 
-- **[M] [adapt from V1]** P5.1 Delete dead code: agents/orchestrator.py, agents/hub.py, agents/base.py registry, dispatcher.py, routers/tasks.py, routers/kernel.py (record_decision, evidence and current_level move to autonomy.py), routers/interview.py, routers/realtime.py, routers/telegram.py and whatsapp.py (replaced by channels/), the old voice brain in routers/voice.py, scout/, scripts/create_realtime_agent.py, GroceryLink preference, InterviewScreen.tsx, ScoutCard.tsx, FlightsScreen.tsx and the widget bridge; ElevenLabs/LiveKit deps nothing imports removed from package.json _(after P4.3, P3.8)_
+- **[M] [adapt from V1]** P6.1 Delete dead code: agents/orchestrator.py, agents/hub.py, agents/base.py registry, dispatcher.py, routers/tasks.py, routers/kernel.py (record_decision, evidence and current_level move to autonomy.py), routers/interview.py, routers/realtime.py, routers/telegram.py and whatsapp.py (replaced by channels/), the old voice brain in routers/voice.py, scout/, scripts/create_realtime_agent.py, GroceryLink preference, InterviewScreen.tsx, ScoutCard.tsx, FlightsScreen.tsx and the widget bridge; ElevenLabs/LiveKit deps nothing imports removed from package.json _(after P4.3, P3.8)_
   - `apps/api/superapp/agents/orchestrator.py`
   - `apps/api/superapp/agents/hub.py`
   - `apps/api/superapp/agents/base.py`
@@ -729,41 +763,16 @@ Remove every module the new spine made redundant, drop the tables nothing reads,
   - `apps/api/superapp/routers/tasks.py`
   - `apps/api/superapp/routers/kernel.py`
   - `apps/api/superapp/kernel.py`
-- **[S] [new]** P5.2 Alembic 0032 drops flight_watches, campaigns, agent_tasks, interview_sessions, interview_turns, grocery_links (and autonomy_grants only if the user chose always-ask); models.py trimmed to match; docstrings promising gates that no longer exist removed _(after P5.1)_
+- **[S] [new]** P6.2 Alembic 0032 drops flight_watches, campaigns, agent_tasks, interview_sessions, interview_turns, grocery_links (and autonomy_grants only if the user chose always-ask); models.py trimmed to match; docstrings promising gates that no longer exist removed _(after P6.1)_
   - `apps/api/alembic/versions/0032_drop_unused.py`
   - `apps/api/superapp/models.py`
-- **[S] [adapt from V1]** P5.3 Fix export_sdui_schema.py MODELS (ShelfItem/Shelf/ShelfBlock) and wire --check into CI; regenerate types.ts; replace docs/ARCHITECTURE.md with a one-page description of the merged system and the plain-language decision table
+- **[S] [adapt from V1]** P6.3 Fix export_sdui_schema.py MODELS (ShelfItem/Shelf/ShelfBlock) and wire --check into CI; regenerate types.ts; replace docs/ARCHITECTURE.md with a one-page description of the merged system and the plain-language decision table
   - `apps/api/scripts/export_sdui_schema.py`
   - `apps/mobile/src/sdui/types.ts`
   - `docs/ARCHITECTURE.md`
-- **[S] [adapt from V1]** P5.4 Tests: delete the test_spine cases for removed features (tasks/dispatch, campaign, kernel promote, interview router, telegram/whatsapp webhooks if the channel adapters replaced their tests in phase 2); test_migrations still upgrades from empty; grep-based checks added to CI _(after P5.1, P5.2)_
+- **[S] [adapt from V1]** P6.4 Tests: delete the test_spine cases for removed features (tasks/dispatch, campaign, kernel promote, interview router, telegram/whatsapp webhooks if the channel adapters replaced their tests in phase 2); test_migrations still upgrades from empty; grep-based checks added to CI _(after P6.1, P6.2)_
   - `apps/api/tests/test_spine.py`
   - `apps/api/tests/test_migrations.py`
-
-### Phase 6: Proactive: goals, cards, follow-ups (design pass first)
-
-Give Nano the layer Muse markets and we lack: it pursues your goals in the background, computes cards you can check, and decides for itself whether a follow-up is worth your attention. The logic is not in any archive, so this phase opens with a design pass (competing proposals, judged) before any code.
-
-**Done when:** A goal captured in chat becomes an objective with state; a scheduled run produces a card whose inputs and formula are visible on tap; a follow-up reaches the thread only when the selector says so and the cost cap allows; the same follow-up is never surfaced twice (dedupe); a run that dies mid-way is recovered by lease expiry; every proactive action appears in the ledger with its cost.
-
-- **[M] [new]** P6.0 Design pass: four proposals (goal-first, card-first, follow-up-first, simplest) judged and synthesised into the concrete objective/card/selector model, before build _(after P3.11)_
-  - `docs/CONSOLIDATION.md`
-- **[M] [new]** P6.1 Objectives: table (objective_id, title, state_json, status, markers) and goals.capture / goals.list / goals.update tools; goal capture from chat writes an objective, not a Markdown line _(after P6.0)_
-  - `apps/api/superapp/tools/goals_tools.py`
-  - `apps/api/alembic/versions/0033_objectives.py`
-- **[M] [port from V2]** P6.2 Objective runs on the scheduler with leases (lease_key, owner, expires_at, heartbeat) so a dead run is reclaimed, and handoff dedupe by content hash so the same result is never surfaced twice _(after P6.1, P2.1)_
-  - `apps/api/superapp/scheduler/engine.py`
-  - `apps/api/superapp/scheduler/jobs.py`
-- **[L] [new]** P6.3 Cards with receipts: calculation_records (inputs, formula, outputs, code version) and calibration_records (a prediction, its window, how it landed); rendered as SDUI cards whose detail shows the inputs and formula _(after P6.2)_
-  - `apps/api/superapp/proactive/cards.py`
-  - `apps/api/superapp/sdui/blocks.py`
-- **[M] [new]** P6.4 Follow-up selector: a scheduled job that scores candidate follow-ups (priority, staleness, last surfaced) and emits at most N per day through authorize() and the cost cap; every decision recorded _(after P6.2, P1.3)_
-  - `apps/api/superapp/proactive/selector.py`
-  - `apps/api/superapp/tools/authorize.py`
-- **[M] [new]** P6.5 Goals tab in the app over /v1/goals, and proactive cards in the thread and on the Hub; tests: test_objectives.py, test_selector.py (never twice, never over cap, never ungated) _(after P6.3, P6.4)_
-  - `apps/mobile/src/GoalsScreen.tsx`
-  - `apps/api/tests/test_objectives.py`
-  - `apps/api/tests/test_selector.py`
 
 ## What we deliberately leave behind
 
