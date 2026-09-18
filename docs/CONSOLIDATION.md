@@ -271,7 +271,7 @@ _Blocks phase 4._
 
 **Why:** Ninety-five percent of mail is never asked about and thread context already lives in the inbox table. The ranking is Muse's, confirmed two ways: its config in the archive (match 0.7 / keywords 0.3, importance prior 0.15, recency prior 0.1 with a 90-day half-life, rerank top 20) and Muse's own description of the behaviour (importance is tagged at write time, a September 9 correction outranks the September 8 version, a score floor, several phrasings per search). V1's store keeps the provenance, SQL scoping and honest degraded flag underneath.
 
-**Beats Muse:** Every recalled line says who said it, where and when; a degraded index automatically lowers autonomy instead of pretending; and memory.explain shows the full receipt for any hit, which Muse only has for some memories.
+**Beats Muse:** Three things Muse's own schema allows and its ranking never uses. Importance is not frozen at write time: a memory that keeps being used in replies moves up and one that is surfaced and ignored does not, a learning-to-rank signal Muse says it cannot see whether it has, and we get for free from the turn log. Decay is per kind, so a preference fades over years, a state in days, and a commitment expires on its own date, instead of one 90-day half-life for everything. A superseded fact is not hidden but returned with what replaced it and when. Plus: every recalled line says who said it, where and when; a degraded index lowers autonomy instead of pretending; memory.explain shows the full receipt for any hit.
 
 ### 24. Retrieval: embedding model · phase 4 · small — **you decide**
 
@@ -391,13 +391,13 @@ _Blocks phase 4._
 
 ### 36. Memory claims with a receipt · phase 3 · medium
 
-**Do:** Behind the notes, Nano keeps structured claims: what was said, the exact quote, who said it, when it was first learned, when it was last confirmed, its current confidence, and what it replaced. When Nano writes a memory it tags it inline with its kind and importance ([preference|medium]), and a memory.explain tool shows the whole receipt for any search hit. Not every line becomes a claim; only what the memory flush extracts.
+**Do:** Behind the notes, Nano keeps structured claims: what was said, the exact quote, who said it, when it was first learned, when it was last confirmed, its current confidence, and what it replaced. When Nano writes a memory it tags it inline with its kind and importance ([preference|medium]); use adjusts that importance over time; each kind of claim decays at its own rate; and a memory.explain tool shows the whole receipt for any hit, including a superseded claim next to its replacement and the date it changed. Not every line becomes a claim; only what the memory flush extracts.
 
 **Replaces:** V1's user_facts (confidence plus a supersession event, nothing else); V2's untagged Markdown lines.
 
 **Why:** Muse's memory.claims table (kind, salience, quote, speaker, evidence, supersedes, confidence, first_seen, reinforced_at, valid_until) matches what Muse itself described: importance decided by the writer at write time, recency by last confirmation, and an explain view of the anatomy. Reinforcement is the piece we lacked: a fact you have confirmed twice should rank fresher than one you said once. The extraction lives in the memory flush we already planned.
 
-**Beats Muse:** The receipt is shown to you, and correcting a claim archives the old one with its quote instead of overwriting it.
+**Beats Muse:** Muse's tag is set once and never learns; ours is corrected by whether the memory actually gets used. Muse's decay is one number; ours reads the kind and valid_until its own schema already carries. Muse hides what a claim replaced; ours tells you what changed and when. And the receipt is shown to you, with a correction archiving the old claim instead of overwriting it.
 
 ## Six build phases
 
@@ -596,7 +596,7 @@ Turn every remaining vertical into tools plus a SKILL.md, dissolve the orchestra
 - **[S] [adapt from V1]** P3.12 Relationship briefs: people.brief(email) builds a short brief from the Person row, mail_history sender/thread history and open drafts; rendered as a card before a reply and on the person's row in the Me tab _(after P3.1)_
   - `apps/api/superapp/people.py`
   - `apps/api/superapp/tools/people_tools.py`
-- **[M] [new]** P3.13 Claims layer: memory_claims table (claim_id, kind, salience low/medium/high, claim_text, quote, speaker, evidence_handles, supersedes_claim_id, status, confidence, first_seen, reinforced_at, valid_until); the memory flush extracts claims from recent turns with a schema-constrained call and reinforces an existing claim instead of duplicating it; memory.write stamps [kind|salience] inline on the line it writes; memory.explain(hit) returns the claim anatomy; supersession archives the old claim _(after P3.3, P1.5)_
+- **[M] [new]** P3.13 Claims layer: memory_claims table (claim_id, kind, salience low/medium/high, claim_text, quote, speaker, evidence_handles, supersedes_claim_id, status, confidence, first_seen, reinforced_at, valid_until); the memory flush extracts claims from recent turns with a schema-constrained call and reinforces an existing claim instead of duplicating it; memory.write stamps [kind|salience] inline on the line it writes; memory.explain(hit) returns the claim anatomy; supersession archives the old claim; salience adjusts from use (a hit cited in a reply raises it, one surfaced and unused does not, capped), recorded as salience_adjustments rows so the tag stays the declared baseline; per-kind half-life table in config (state 7d, fact 365d, preference 730d, commitment decays to valid_until, default 90d); memory.search returns a superseded hit together with its replacement and the supersession date _(after P3.3, P1.5)_
   - `apps/api/superapp/memory/claims.py`
   - `apps/api/superapp/tools/memory_tools.py`
   - `apps/api/superapp/scheduler/jobs.py`

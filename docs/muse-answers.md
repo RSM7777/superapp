@@ -32,3 +32,10 @@ the recency anchor.
 
 **Taken into the plan:** row 23 (ranking), new row 36 (claims layer with
 inline tags and a `memory.explain` tool), P3.13 and P4.1.
+
+**Where we do better than what Muse described:** importance is corrected by
+use (a hit cited in a reply rises; one surfaced and ignored does not), a
+learning-to-rank signal Muse said it cannot see whether it has and we get
+from the turn log; decay is per kind using the `kind` and `valid_until` its
+own claims table carries but its ranking ignores; a superseded claim is
+returned with its replacement and the date, instead of hidden.
