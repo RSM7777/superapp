@@ -2,7 +2,7 @@
 
 _Every architectural decision, in plain language. Generated from the design phase; the same source as the shareable page._
 
-Nano becomes one agent you talk to, built in Muse's shape and running inside the FastAPI + Postgres body you already have. The spine is V2's: a single agent loop with a persistent thread, a folder of plain Markdown it keeps about you (SOUL, IDENTITY, USER, MEMORY, people, a daily log), skills as plain-English playbooks, a durable scheduler whose results land in the thread, subagents for parallel errands, and approval cards rendered outside the model's reach. Underneath, V1's discipline is installed at every seam where Muse is thin: every model call goes through V1's metered, cached provider; every tool call passes one authorize() check built from V1's risk tiers and backstops; memory writes go through one validated, secret-guarded, archived door; the inbox keeps its code-computed triage and a send tool that only accepts a vetted draft id; Postgres migrations and the 141 tests stay the regression net. Your months of UI survive as the card language and the tabs: the thread is home, V1's SDUI blocks ride the same WebSocket as cards with ids, and Hub, Inbox, Today (CalScreen), Me (Profile + Connectors + Memory), BriefPlayer and the NanoOrb sit around the thread fed by the same substrate the agent reads. Five buildable phases on the "consolidated" branch, each leaving the tests green; three decisions only you can make (which model, earned vs always-ask autonomy, which embedding model), none of which blocks the first two phases from running in stub mode.
+Nano becomes one agent you talk to, built in Muse's shape and running inside the FastAPI + Postgres body you already have. The spine is V2's: a single agent loop with a persistent thread, a folder of plain Markdown it keeps about you (SOUL, IDENTITY, USER, MEMORY, people, a daily log), skills as plain-English playbooks, a durable scheduler whose results land in the thread, subagents for parallel errands, and approval cards rendered outside the model's reach. Underneath, V1's discipline is installed at every seam where Muse is thin: every model call goes through V1's metered, cached provider; every tool call passes one authorize() check built from V1's risk tiers and backstops; memory writes go through one validated, secret-guarded, archived door; the inbox keeps its code-computed triage and a send tool that only accepts a vetted draft id; Postgres migrations and the 141 tests stay the regression net. Your months of UI survive as the card language and the tabs: the thread is home, V1's SDUI blocks ride the same WebSocket as cards with ids, and Hub, Inbox, Today (CalScreen), Me (Profile + Connectors + Memory), BriefPlayer and the NanoOrb sit around the thread fed by the same substrate the agent reads. Six buildable phases on the "consolidated" branch, each leaving the tests green; three decisions only you can make (which model, earned vs always-ask autonomy, which embedding model), none of which blocks the first two phases from running in stub mode.
 
 ## The verdict in one paragraph
 
@@ -39,7 +39,7 @@ _Blocks phase 4._
 
 **Recommendation:** A for a personal project: no key to manage, no network dependency for memory, and the store, provenance and scoping are what matter; swapping later is one function plus one migration.
 
-## All thirty decisions
+## All 35 decisions
 
 ### 1. Core loop · phase 1 · large
 
@@ -339,7 +339,57 @@ _Blocks phase 4._
 
 **Beats Muse:** Each block cites the tool or table it talks about, so a reference to something we do not have is a failing test instead of a confused agent.
 
-## Five build phases
+### 31. Skills: Nano writes its own · phase 3 · small
+
+**Do:** Nano can create its own skills: when a task turns out to be repeatable, it drafts a SKILL.md into your workspace skills folder using Muse's skill-creator playbook, and the catalog picks it up next turn.
+
+**Replaces:** Nothing. This is what Meta markets as 'automated skill creation'.
+
+**Why:** It is a 53-line playbook plus one catalog rule to scan user-authored skills, not a subsystem; I had wrongly lumped it in with the twelve-table engine below. Cheap, and it is a large part of why Muse keeps getting more capable for one person.
+
+**Beats Muse:** A self-written skill goes through the same honesty test and manifest rules as ours, so Nano cannot write itself a skill that names a tool that does not exist.
+
+### 32. Learnings · phase 3 · medium
+
+**Do:** Separate from remembering facts, Nano keeps learnings about HOW to do things for you ('when he asks for a summary he wants three bullets, not prose'), extracted by the hourly memory flush; each records whether it was adopted and how it turned out, and adopted ones enter the prompt.
+
+**Replaces:** Nothing. V1 remembers facts and playbooks; neither codebase tracks whether a learning worked.
+
+**Why:** Muse's learning_adoption_events table (learning_id, outcome, detail) is the loop that makes it better at doing things, not just at knowing things. The extraction and adoption logic is not in any archive, so we design it, but it is a small loop on top of the memory flush already planned.
+
+**Beats Muse:** Every learning carries its outcome record and can be revoked from the Memory page; Muse's are invisible to the user.
+
+### 33. Connector read audit · phase 2 · small
+
+**Do:** Every time Nano reads from your mail, bank or health data, one row records which connector, for what purpose, and how sensitive, and the Me tab shows it.
+
+**Replaces:** Nothing.
+
+**Why:** Muse's connector_read_audit table (connector, method, purpose, sensitivity, request origin). It is the receipt that answers 'what did it look at', it is cheap, and for a project whose whole point is not handing your life to someone else it is the right kind of paranoia.
+
+**Beats Muse:** Ours is shown to you, not only kept for the system.
+
+### 34. Relationship briefs · phase 3 · small
+
+**Do:** For the people you deal with most, Nano keeps a short living brief (who they are to you, what is open between you) built from the people graph, and shows it as a card before you reply to them.
+
+**Replaces:** Extends V1's people.py rather than replacing it.
+
+**Why:** Muse's relationship_briefs table. V1 already has the people graph with an LLM merge and forward-only last-seen; this is a rendering and a card, not new memory.
+
+**Beats Muse:** Built on records with provenance (mail history, sent replies) rather than on prose the model wrote about itself.
+
+### 35. Proactive engine: goals, cards, follow-ups · phase 6 · large
+
+**Do:** Nano pursues your goals in the background: each goal is an objective with its own state; scheduled runs produce cards (a spending calculation with its inputs and formula, a calibration of a prediction it made); and a selector decides whether a follow-up is worth surfacing to you at all.
+
+**Replaces:** V2's Goals and Ideas JSON placeholders (dropped) and V1's morning brief as the only proactive surface.
+
+**Why:** This is the real content of Muse's self_improvement schema: objectives, runs with leases and recovery, calculation and calibration cards, follow-up attempts with a selector, handoff dedupe. It is the proactive layer Meta advertises and the biggest thing Muse does that we do not. The tables give us the shape; the logic lives in Meta's binary, so we design it ourselves. It is a phase of its own and needs a proper design pass before a line is written.
+
+**Beats Muse:** Every card shows the inputs and the formula it was computed from (Muse stores them in calculation_records; we would surface them), and every follow-up passes the same authorize() gate and daily cost cap as everything else, so proactivity cannot become spam.
+
+## Six build phases
 
 ### Phase 1: Spine: one agent you can talk to
 
@@ -460,6 +510,10 @@ Port the scheduler, move the auto-send window onto persisted approvals with a de
   - `apps/api/tests/test_inbox_tools.py`
   - `apps/api/tests/test_spine.py`
   - `apps/api/tests/test_inbox_release.py`
+- **[S] [new]** P2.8 Connector read audit: connector_reads table (connector, method, purpose, sensitivity, request_origin, run_id); written by every MailClient/StoreClient/Plaid/HealthKit read through the factory; surfaced on the Me tab and in the Activity sheet _(after P1.3)_
+  - `apps/api/superapp/inbox/factory.py`
+  - `apps/api/superapp/grocery/factory.py`
+  - `apps/api/alembic/versions/0030_connector_reads.py`
 
 ### Phase 3: Everything is a skill; the app is thread-first
 
@@ -520,6 +574,18 @@ Turn every remaining vertical into tools plus a SKILL.md, dissolve the orchestra
   - `apps/api/tests/test_subagents.py`
   - `apps/api/tests/test_hub_payload.py`
   - `apps/api/tests/test_spine.py`
+- **[S] [port from V2]** P3.10 Skill creation: port skills/skill-creator/SKILL.md (Muse's 53-line playbook) as our first skill-that-writes-skills; the catalog scans data/homes/<user_id>/workspace/skills/ as well as apps/api/skills/, applies the same honesty test and manifest rules to user-authored skills, and a self-written skill that names a missing tool is rejected with the reason _(after P2.4)_
+  - `apps/api/skills/skill-creator/SKILL.md`
+  - `apps/api/superapp/prompts/skills_catalog.py`
+  - `apps/api/tests/test_skills_catalog.py`
+- **[M] [new]** P3.11 Learnings loop: learnings table (learning_id, text, source run, status proposed/adopted/revoked) and learning_outcomes (learning_id, run_id, outcome, detail); the hourly memory-flush job proposes learnings from the last N turns with a schema-constrained call; adopted learnings are a computed prompt section; a learnings.revoke tool and a Memory-page list; outcome recorded when a later turn used one _(after P3.3, P1.6)_
+  - `apps/api/superapp/scheduler/jobs.py`
+  - `apps/api/superapp/tools/memory_tools.py`
+  - `apps/api/superapp/prompts/assembler.py`
+  - `apps/api/alembic/versions/0031_learnings.py`
+- **[S] [adapt from V1]** P3.12 Relationship briefs: people.brief(email) builds a short brief from the Person row, mail_history sender/thread history and open drafts; rendered as a card before a reply and on the person's row in the Me tab _(after P3.1)_
+  - `apps/api/superapp/people.py`
+  - `apps/api/superapp/tools/people_tools.py`
 
 ### Phase 4: Depth: retrieval, hands, deploy
 
@@ -560,7 +626,7 @@ Bring retrieval up to the merged spec on the embedding model you chose, add the 
   - `apps/api/tests/test_browser_gate.py`
   - `apps/api/tests/test_migrations.py`
 
-### Phase 5: Delete the dead weight
+### Phase 5: Delete the dead weight (runs last, after phase 6)
 
 Remove every module the new spine made redundant, drop the tables nothing reads, fix the SDUI toolchain, and rewrite the architecture doc, so the backend is smaller than the 13.5k lines it is today and boots correctly on its own.
 
@@ -585,6 +651,31 @@ Remove every module the new spine made redundant, drop the tables nothing reads,
   - `apps/api/tests/test_spine.py`
   - `apps/api/tests/test_migrations.py`
 
+### Phase 6: Proactive: goals, cards, follow-ups (design pass first)
+
+Give Nano the layer Muse markets and we lack: it pursues your goals in the background, computes cards you can check, and decides for itself whether a follow-up is worth your attention. The logic is not in any archive, so this phase opens with a design pass (competing proposals, judged) before any code.
+
+**Done when:** A goal captured in chat becomes an objective with state; a scheduled run produces a card whose inputs and formula are visible on tap; a follow-up reaches the thread only when the selector says so and the cost cap allows; the same follow-up is never surfaced twice (dedupe); a run that dies mid-way is recovered by lease expiry; every proactive action appears in the ledger with its cost.
+
+- **[M] [new]** P6.0 Design pass: four proposals (goal-first, card-first, follow-up-first, simplest) judged and synthesised into the concrete objective/card/selector model, before build _(after P3.11)_
+  - `docs/CONSOLIDATION.md`
+- **[M] [new]** P6.1 Objectives: table (objective_id, title, state_json, status, markers) and goals.capture / goals.list / goals.update tools; goal capture from chat writes an objective, not a Markdown line _(after P6.0)_
+  - `apps/api/superapp/tools/goals_tools.py`
+  - `apps/api/alembic/versions/0033_objectives.py`
+- **[M] [port from V2]** P6.2 Objective runs on the scheduler with leases (lease_key, owner, expires_at, heartbeat) so a dead run is reclaimed, and handoff dedupe by content hash so the same result is never surfaced twice _(after P6.1, P2.1)_
+  - `apps/api/superapp/scheduler/engine.py`
+  - `apps/api/superapp/scheduler/jobs.py`
+- **[L] [new]** P6.3 Cards with receipts: calculation_records (inputs, formula, outputs, code version) and calibration_records (a prediction, its window, how it landed); rendered as SDUI cards whose detail shows the inputs and formula _(after P6.2)_
+  - `apps/api/superapp/proactive/cards.py`
+  - `apps/api/superapp/sdui/blocks.py`
+- **[M] [new]** P6.4 Follow-up selector: a scheduled job that scores candidate follow-ups (priority, staleness, last surfaced) and emits at most N per day through authorize() and the cost cap; every decision recorded _(after P6.2, P1.3)_
+  - `apps/api/superapp/proactive/selector.py`
+  - `apps/api/superapp/tools/authorize.py`
+- **[M] [new]** P6.5 Goals tab in the app over /v1/goals, and proactive cards in the thread and on the Hub; tests: test_objectives.py, test_selector.py (never twice, never over cap, never ungated) _(after P6.3, P6.4)_
+  - `apps/mobile/src/GoalsScreen.tsx`
+  - `apps/api/tests/test_objectives.py`
+  - `apps/api/tests/test_selector.py`
+
 ## What we deliberately leave behind
 
 - **[V1] AgentSpec.think()/render() registry, POST /v1/agents/{name}/think, SCREEN_AGENTS and _REGISTRY as entrypoints** — Three hand-synced registries and a 17-touch-point checklist per vertical; the think bodies survive as tool handlers and the render bodies as screen builders.
@@ -604,5 +695,5 @@ Remove every module the new spine made redundant, drop the tables nothing reads,
 - **[V2] In-memory ApprovalStore with 600s blocking wait, muse.exec with inherited daemon env, /internal/approvals token callback** — Loses cards on restart, times out the CLI, leaks the vault key; replaced by persisted approvals answerable only from the phone and in-process tools.
 - **[V2] Client-side compaction, the 500-entry in-memory event ring, process-global SPAWNS/POOL/SESSIONS** — Server-side compaction with persisted compaction blocks, persisted agent_messages, and per-Room registries with ownership replace them.
 - **[V2] AGENTS.md, TOOLS.md, groups index and bank files; Markdown job files and bash hooks** — No V2 role ever wrote them; six standing files and rows-only jobs carry what Muse actually uses for one person.
-- **[V2] Ideas, Goals, Library JSON-file tabs, feed.json, side chats, attachments, event_hook role, button-text sensitivity regex** — Placeholders, unwired or unsafe; goals can return later as a real table in the Hub, ideas as scheduler-delivered cards, and the browser gate classifies by field type and URL instead.
 - **[V2] The 308 ported blocks as-is, scripts/port_blocks.py, the 34 source blocks damaged in extraction, and the ~20 builder-role folders** — The archive confirms the damage is at the source and no assembly recipe was ever captured. The undamaged blocks survive as wording we borrow; the behaviour comes from the replication kit's clean 102-line spec.
+- **[V2] Ideas, Goals, Library JSON-file tabs as placeholders; feed.json; side chats; attachments; event_hook role; button-text sensitivity regex** — Placeholders and unwired code. Goals return in phase 6 as real objectives with runs and cards; ideas as scheduler-delivered cards; the browser gate classifies by field type and URL instead.
