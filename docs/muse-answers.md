@@ -76,3 +76,36 @@ explicit corrections become claims at the end of the turn, not at the next
 hourly run; where a claim came from (user, assistant, email, document) is
 load-bearing for autonomy, and we say "sourced" and "confirmed" instead of
 "verified"; a raw line that keeps being retrieved is promoted to a claim.
+
+## 4. What is a learning, what creates one, what adopting means, how it knows it worked (asked 2026-09-17)
+
+**Muse said:** a memory is descriptive (what was); a learning is prescriptive
+(what I will do differently). Learnings live where behaviour runs: AGENTS.md
+("a mistake not to repeat"), a skill's FIELD_NOTES.md, rule changes in
+SKILL.md, cron bodies, code. Friction creates them — a correction, a mistake,
+the loss-review loop (document, research, fold into the skill as a rule,
+report) — and so do the nightly dreaming pass and the daily skill review.
+Adoption means the lesson governs behaviour without being re-argued; a wrong
+learning therefore silently steers every future run. It knows one worked when
+the problem stops recurring, the dreaming pass agrees, and the skill review
+does not retire it.
+
+**Muse's own caveat:** a "hardened rule" in its field notes ("never trust exec
+stdout for option IDs") was adopted from workers reporting corrupted data;
+Muse checked twice and the data was correct. The premise was hallucination,
+the rule is now ritual, and retirement "only works if someone interrogates
+the premise".
+
+**Taken into the plan:** the memory/learning distinction; friction as the
+trigger; adoption as "written where future runs trip over it"; the three
+verification levels; AGENTS.md restored as the learnings file (rows 6, 32,
+P1.5, P3.11); a skill-review job and per-skill FIELD_NOTES.md.
+
+**Where we do better:** a learning carries a basis that decides adoption
+(your correction: now; an observed pattern: after it recurs independently; a
+worker's report: never on its own), so Muse's calcified rule cannot happen;
+adoption requires a named success signal and a review date, checked by a
+scheduled job, so retirement is scheduled rather than hoped for; a learning
+that governs an action is a standing rule needing your yes and can never
+raise what authorize() allows; all learnings are in one place with origin
+and outcome, revocable in a tap.

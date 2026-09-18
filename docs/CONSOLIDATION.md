@@ -95,11 +95,11 @@ _Blocks phase 4._
 
 ### 6. Memory · phase 1 · medium
 
-**Do:** Give each user a folder of six plain Markdown files the agent reads every turn and keeps current (SOUL, IDENTITY, USER, MEMORY, people pages, a daily log), and keep records (mail, meals, purchases, transactions) in the existing Postgres tables; the agent can only change the files through one memory.write tool that validates, refuses secrets, caps size and archives the previous version.
+**Do:** Give each user a folder of seven plain Markdown files the agent reads every turn and keeps current: SOUL, IDENTITY, USER, MEMORY, AGENTS (its operating manual: the learnings it has adopted, rendered from the learnings table and editable back into it), people pages, and a daily log. Records (mail, meals, purchases, transactions) stay in the existing Postgres tables. The agent can only change the files through one memory.write tool that validates, refuses secrets, caps size and archives the previous version.
 
-**Replaces:** V2's eight standing files plus four bank files edited with generic file tools and no guard (AGENTS, TOOLS, groups and bank were never written by any V2 role, verified in files.py); V1's opaque JSON facts that no prompt ever read (to_prompt_dict has zero callers).
+**Replaces:** V2's eight standing files plus four bank files edited with generic file tools and no guard; V1's opaque JSON facts that no prompt ever read (to_prompt_dict has zero callers). TOOLS.md is not carried: Muse uses it for local setup notes, which the skills catalog and connector status cover.
 
-**Why:** Self-maintained files you can open are what make Muse feel like it knows you, and V1 has no equivalent. V1's write_fact already has the validator, secret guard and supersession archive V2 lacks, so the tool wraps it; user_facts stays as the machine-readable mirror for rules code must read (mute, priority, auto-reply).
+**Why:** Self-maintained files you can open are what make Muse feel like it knows you, and V1 has no equivalent. V1's write_fact already has the validator, secret guard and supersession archive V2 lacks, so the tool wraps it. AGENTS.md was wrongly dropped in the first draft because V2's port never wrote it; Muse has since confirmed twice that it is the file where learnings live ('a mistake not to repeat'), so it is back, as the readable face of the learnings table.
 
 **Beats Muse:** Every memory edit leaves an archived previous version with who wrote it and when, secrets are refused at the door, and a Memory page in the app lets you read and correct the same files.
 
@@ -351,13 +351,13 @@ _Blocks phase 4._
 
 ### 32. Learnings · phase 3 · medium
 
-**Do:** Separate from remembering facts, Nano keeps learnings about HOW to do things for you ('when he asks for a summary he wants three bullets, not prose'), extracted by the hourly memory flush; each records whether it was adopted and how it turned out, and adopted ones enter the prompt.
+**Do:** Separate from memories (what was), Nano keeps learnings (what it will do differently next time). A learning is born from friction: your correction, a mistake, or a loss; it is proposed with its evidence, adopted only when its basis allows, written where future runs will trip over it (AGENTS.md, a skill's rules, a job's instructions), given a review date and a named signal for whether it worked, and retired by a scheduled review when it does not help. All of them are in one place with their origin and outcome, revocable in one tap.
 
-**Replaces:** Nothing. V1 remembers facts and playbooks; neither codebase tracks whether a learning worked.
+**Replaces:** Nothing. V1 remembers facts and playbooks and has a nightly reflection pass; neither codebase tracks whether a lesson worked, and V1's reflection never ran in the documented deploy.
 
-**Why:** Muse's learning_adoption_events table (learning_id, outcome, detail) is the loop that makes it better at doing things, not just at knowing things. The extraction and adoption logic is not in any archive, so we design it, but it is a small loop on top of the memory flush already planned.
+**Why:** Muse's own account: a memory is descriptive, a learning is prescriptive; friction creates them (correction, loss review, a nightly dreaming pass, a daily skill review); adopting one means it governs behaviour without being re-argued; it knows a learning worked when the problem stops recurring, the dreaming pass agrees, and the skill review does not retire it. And its own caveat, worth more than the rest: a 'hardened rule' in its field notes came from workers reporting corrupted data that was in fact correct both times Muse checked, so a learning adopted from an unverified observation is now ritual, and retirement 'only works if someone interrogates the premise'. That is the spec for ours.
 
-**Beats Muse:** Every learning carries its outcome record and can be revoked from the Memory page; Muse's are invisible to the user.
+**Beats Muse:** Four things, three of them answers to Muse's own admission. A learning carries a basis, and the basis decides adoption: your correction adopts at once; something Nano observed adopts only after it recurs independently; a worker's report never adopts on its own, so Muse's calcified rule cannot happen. At adoption a learning must name the signal that would show it worked and a review date, and a scheduled review checks the signal; a lesson nobody can name a signal for stays a memory, not a rule, so retirement is scheduled rather than hoped for. A learning can make Nano stricter or change how it does a task, but one that governs an action (send, spend, schedule) is a standing rule that needs your yes, and no learning can raise what authorize() allows; Muse's are adopted straight into cron bodies with real effects. And they are visible in one place with their origin and outcome, where Muse's are scattered across five kinds of file.
 
 ### 33. Connector read audit · phase 2 · small
 
@@ -430,7 +430,7 @@ Land the general loop, the tool registry with authorize() and persisted approval
   - `apps/api/superapp/routers/approvals.py`
   - `apps/api/superapp/push.py`
   - `apps/api/superapp/auth_sessions.py`
-- **[M] [port from V2]** P1.5 Home-directory memory: six standing files per user under data/homes/<user_id>/ (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, memory/people/, memory/YYYY-MM-DD.md) with a token cap on injection; memory.write / memory.edit / memory.remember_fact / memory.facts / memory.search(FTS-only for now) tools wrapping write_fact's validator, the SECRET_HINT guard, the size cap and a memory_superseded archive event; a one-line computed state header appended after the files _(after P1.3)_
+- **[M] [port from V2]** P1.5 Home-directory memory: seven standing files per user under data/homes/<user_id>/ (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, AGENTS.md rendered from the learnings table, memory/people/, memory/YYYY-MM-DD.md) with a token cap on injection; memory.write / memory.edit / memory.remember_fact / memory.facts / memory.search(FTS-only for now) tools wrapping write_fact's validator, the SECRET_HINT guard, the size cap and a memory_superseded archive event; a one-line computed state header appended after the files _(after P1.3)_
   - `apps/api/superapp/memory/home.py`
   - `apps/api/superapp/tools/memory_tools.py`
   - `apps/api/superapp/substrate/facts.py`
@@ -588,7 +588,7 @@ Turn every remaining vertical into tools plus a SKILL.md, dissolve the orchestra
   - `apps/api/skills/skill-creator/SKILL.md`
   - `apps/api/superapp/prompts/skills_catalog.py`
   - `apps/api/tests/test_skills_catalog.py`
-- **[M] [new]** P3.11 Learnings loop: learnings table (learning_id, text, source run, status proposed/adopted/revoked) and learning_outcomes (learning_id, run_id, outcome, detail); the hourly memory-flush job proposes learnings from the last N turns with a schema-constrained call; adopted learnings are a computed prompt section; a learnings.revoke tool and a Memory-page list; outcome recorded when a later turn used one _(after P3.3, P1.6)_
+- **[M] [new]** P3.11 Learnings loop: learnings table (learning_id, text, kind stricter/how/action, basis user_correction/observed_recurrence/worker_report, evidence_handles, status proposed/adopted/revoked/retired, adopted_at, review_at, success_signal, outcome) and learning_outcomes (learning_id, run_id, outcome, detail); proposed by the hourly memory flush and the nightly reflection from corrections, mistakes and losses; adoption by basis (user_correction now; observed_recurrence after >=2 independent occurrences; worker_report never automatic); an action-governing learning is a tier-2 standing rule needing the user's yes and cannot raise authorize(); adopted learnings render into AGENTS.md (editable back through memory.write) and into the named skill's rules or job's instructions; a weekly skill-review job checks each learning's success_signal and retires or re-proposes, and audits skills against recent runs, appending to skills/<name>/FIELD_NOTES.md; learnings.list/revoke tools and a Memory-page list with origin and outcome _(after P3.3, P1.6)_
   - `apps/api/superapp/scheduler/jobs.py`
   - `apps/api/superapp/tools/memory_tools.py`
   - `apps/api/superapp/prompts/assembler.py`
