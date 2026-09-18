@@ -85,13 +85,13 @@ _Blocks phase 4._
 
 ### 5. Prompts · phase 1 · medium
 
-**Do:** Keep V2's prompt-assembly structure (an ordered list of blocks per role) but throw away all 308 ported Muse blocks and write about 25 of our own that only name tools and files that exist; build the prompt once per turn so the cache works.
+**Do:** Keep V2's prompt-assembly structure, and build our ~25 blocks by ADAPTING Muse's material rather than writing blind: the replication kit's agent_spec.md and soul.md are the source of truth for behaviour, the ~234 undamaged blocks in the five roles we actually run supply wording, the 13 files that say Muse or Meta get renamed, and every muse.* tool reference is mapped to ours or the block is dropped. Assemble once per turn so the cache works.
 
-**Replaces:** V2's ported corpus (vendor-branded 'created by Meta inside Muse', mandates muse.skill_search and ~/docs that do not exist, 193 of 308 unreachable, extraction noise) and its per-round rebuild with a seconds-precision clock; V1's TRIAGE/VERIFY/DRAFT/STYLE prompts stay verbatim inside their tools.
+**Replaces:** The earlier plan to write all 25 from scratch; V2's per-round rebuild with a seconds-precision clock; the 34 blocks damaged at the source and the ~20 builder roles we will never run (artifact, spaces, ideas, deep research, media upload).
 
-**Why:** Argued on merit only: cleaning the ported text means rewriting most of it anyway, and a corpus we wrote can be tested (a CI test asserts every tool or file a block names is real). Rebuilding a 36k-token prompt every round with a changing timestamp defeats caching, which is the single biggest cost lever; the clock moves to a mid-conversation system message on Opus 5 (or a trailing block at hour granularity on Sonnet 5) so the cached prefix is byte-stable.
+**Why:** The user is right that 'made for Muse' is a rename, not a reason: only 13 of 268 source files name Muse or Meta. What cannot be renamed is damage at the source (31 files with another file's path fused in, 3 with binary garbage; the archive is the broken files, not a fix for them), a missing assembly recipe (no roles manifest was ever captured, which is why 193 blocks were unreachable), and 41 files that drive Muse-only tools such as muse.finish_step. The kit's 102-line spec is exactly the behavioural checklist the plan wanted, already written and clean.
 
-**Beats Muse:** Roughly a third fewer tokens per round and a cache hit on every round after the first; prompt-code drift is a failing test instead of a mystery.
+**Beats Muse:** We keep Muse's tuned wording for initiative, memory doctrine and safety where it is good, lose nothing to extraction damage, and a prompt-honesty test fails on any phantom tool the adaptation misses.
 
 ### 6. Memory · phase 1 · medium
 
@@ -329,15 +329,15 @@ _Blocks phase 4._
 
 **Why:** One person has to be able to hold this program in their head. A grep-based done-when (no crontab, scout, Outlook, ElevenLabs, LiveKit references) makes the deletion real.
 
-### 30. Prompt blocks: build vs clean · phase 1 · medium
+### 30. Prompt blocks: adapt, not clean or rewrite · phase 1 · medium
 
-**Do:** Write our own blocks rather than clean the ported ones, and enforce it with a test that every tool, file and skill a block mentions exists.
+**Do:** Start from agent_spec.md and soul.md, borrow wording from the undamaged blocks, rename the 13 Muse/Meta references, map or drop the 25 muse.* tool names; enforce it with a test that every tool, file and skill a block mentions exists.
 
-**Replaces:** scripts/port_blocks.py and the 308 recovered blocks.
+**Replaces:** scripts/port_blocks.py's repair-by-regex of the damaged extraction, and the plan to write from scratch.
 
-**Why:** Decided on quality (phantom tools, vendor identity, noise), cache stability (per-round rebuild) and maintainability (only 115 of 308 reachable, none testable) as the constraint asked; provenance risk disappears as a side effect. Muse's tuned behaviours (initiative, memory doctrine, silent turns) are carried over as a checklist of behaviours per role, not as text.
+**Why:** Cleaning 268 files of which 34 are damaged at the source, with no assembly order, is more work and less reliable than adapting the 234 that are whole. Writing from scratch throws away Muse's tuned wording, which is the thing the user values. Adapting keeps the voice and the honesty test keeps the drift out.
 
-**Beats Muse:** Each block cites the tool or table it talks about, so drift is a failing test.
+**Beats Muse:** Each block cites the tool or table it talks about, so a reference to something we do not have is a failing test instead of a confused agent.
 
 ## Five build phases
 
@@ -375,12 +375,14 @@ Land the general loop, the tool registry with authorize() and persisted approval
   - `apps/api/superapp/tools/memory_tools.py`
   - `apps/api/superapp/substrate/facts.py`
   - `V2/superapp/memory/files.py`
-- **[M] [new]** P1.6 Prompts: port roles.yaml and assembler.py; write our own ~25 blocks for chat, subagent, scheduler_worker and memory_flush roles (identity, who you work for, trust and untrusted content, memory doctrine, tool rules, skills, scheduled work, approvals and countdowns, security, style and the spoken 'say' field); assemble once per turn under the provider's cache_control breakpoint; clock delivered as a mid-conversation system message on Opus 5 (trailing block at hour granularity on Sonnet 5); prompt-honesty test that every tool, file and skill named exists _(after P1.3, P1.5)_
+- **[M] [new]** P1.6 Prompts: port roles.yaml and assembler.py; build ~25 blocks for chat, subagent, scheduler_worker and memory_flush by adapting Muse's material (friend_replication_kit/agent_spec.md and soul.md as the behavioural source of truth; wording borrowed from the undamaged aria blocks in chat/, shared/, memory_flush/, scheduler_worker/, browser_task/; the 13 Muse/Meta mentions renamed; the 25 muse.* tool names mapped to ours or the block dropped; the 34 damaged files and the builder-role folders excluded); assemble once per turn under the provider's cache_control breakpoint; clock as a mid-conversation system message on Opus 5 (trailing block at hour granularity on Sonnet 5); prompt-honesty test that every tool, file and skill named exists _(after P1.3, P1.5)_
   - `apps/api/superapp/prompts/roles.yaml`
   - `apps/api/superapp/prompts/assembler.py`
   - `apps/api/superapp/prompts/blocks/`
   - `apps/api/tests/test_prompts.py`
-  - `V2/superapp/prompts/assembler.py`
+  - `musearch/friend_replication_kit/agent_spec.md`
+  - `musearch/friend_replication_kit/soul.md`
+  - `aria/prompt-blocks/blocks/`
 - **[M] [port from V2]** P1.7 Chat transport: WS /v1/chat with V2's frame protocol (turn_start/text_delta/event/turn_end/approval/approval_resolved) plus message ids, paginated GET /v1/history and a 'screen' frame carrying a validated V1 Screen/Section JSON card; screen.emit tool; cost.summary tool over llm_call events _(after P1.2, P1.4)_
   - `apps/api/superapp/routers/chat.py`
   - `apps/api/superapp/tools/screen_tools.py`
@@ -400,6 +402,7 @@ Land the general loop, the tool registry with authorize() and persisted approval
   - `apps/mobile/src/cards/ApprovalCard.tsx`
   - `apps/mobile/App.tsx`
   - `apps/mobile/src/sdui/renderer.tsx`
+  - `V2/apps/mobile/src/screens/ChatScreen.tsx`
 - **[M] [new]** P1.10 Tests: test_agent_loop.py (scripted stub tool calls, handoff coalescing, compaction blocks round-trip), test_authorize.py (tier x provenance x suspicious x level matrix; dispatch refuses invisible tools; untrusted wrapping taints the turn; injected email cannot reach a new recipient), test_approvals.py (claim, expiry defaults, phone-session-only resolve), test_memory_home.py (secrets refused, supersessions archived, cap honoured); all 141 existing tests untouched _(after P1.2, P1.3, P1.4, P1.5, P1.6, P1.7, P1.8)_
   - `apps/api/tests/test_agent_loop.py`
   - `apps/api/tests/test_authorize.py`
@@ -419,6 +422,7 @@ Port the scheduler, move the auto-send window onto persisted approvals with a de
   - `apps/api/alembic/versions/0029_scheduler.py`
   - `apps/api/superapp/main.py`
   - `V2/superapp/scheduler/engine.py`
+  - `V2/superapp/scheduler/tools.py`
 - **[M] [adapt from V1]** P2.2 Auto-send as approval kind 'auto_reply' with a deadline job: schedule/announce/claim/re-gate/stale-claim-hold semantics preserved, default_on_expiry=allow only when a user-created standing rule (tier 2, user provenance) matched and every gate passes on the current body; threading.Timer and rearm_all removed; GET /inbox/state loses its send side effect; every other approval kind defaults to deny on expiry _(after P2.1, P1.4)_
   - `apps/api/superapp/autosend.py`
   - `apps/api/superapp/approvals.py`
@@ -444,6 +448,7 @@ Port the scheduler, move the auto-send window onto persisted approvals with a de
   - `apps/api/superapp/routers/telegram.py`
   - `apps/api/superapp/routers/whatsapp.py`
   - `apps/api/superapp/routers/realtime.py`
+  - `apps/api/superapp/voice.py`
 - **[M] [adapt from V1]** P2.6 Mobile: InboxScreen fed by GET /v1/inbox/state (pure) plus a WS inbox.changed invalidation instead of the 30s poll; the decision-card countdown reads the approval deadline and resolves through /v1/approvals; NanoOrb sends on-device STT transcripts over the socket and speaks turn_end text via /v1/voice/speak with seq gating (from V2 Orb.tsx) and BriefPlayer's audio-clock handoff _(after P2.2, P2.5)_
   - `apps/mobile/src/InboxScreen.tsx`
   - `apps/mobile/src/NanoOrb.tsx`
@@ -469,6 +474,7 @@ Turn every remaining vertical into tools plus a SKILL.md, dissolve the orchestra
   - `apps/api/superapp/tools/stylist_tools.py`
   - `apps/api/superapp/tools/people_tools.py`
   - `apps/api/superapp/tools/flights_tools.py`
+  - `apps/api/superapp/agents/nutrition.py`
 - **[M] [new]** P3.2 SKILL.md and manifest.yaml for nutrition, grocery, finance, stylist, people, flights, morning-brief, memory-upkeep and identity-interview (interview.py SECTIONS become the playbook); test_skills_catalog extended to every skill _(after P3.1)_
   - `apps/api/skills/`
   - `apps/api/tests/test_skills_catalog.py`
@@ -496,6 +502,7 @@ Turn every remaining vertical into tools plus a SKILL.md, dissolve the orchestra
   - `apps/api/superapp/routers/auth.py`
   - `apps/api/superapp/auth.py`
   - `apps/mobile/src/OnboardingScreen.tsx`
+  - `V2/apps/mobile/src/screens/OnboardingScreen.tsx`
 - **[L] [adapt from V1]** P3.7 Mobile thread-first: App.tsx becomes tabs Hub / Chat / Inbox / Today / Me with NanoOrb docked; HubScreen over /v1/hub; CalScreen over /v1/nutrition/state; ProfileScreen merged with a Connectors panel (status from manifests + vault) and a Memory page (GET/PUT /v1/memory/files through the guarded write path); BriefPlayer fed by the morning-brief card; Finance/Stylist/Grocery as SduiScreen pages from the Hub grid; Flights folded into the thread (cards) and a Hub timeline row; every setInterval poll replaced by WS invalidations; ActivitySheet vocabulary covers tool_call, tool_result, approval, handoff, compaction, job_run, subagent _(after P3.4, P3.3, P1.9, P2.6)_
   - `apps/mobile/App.tsx`
   - `apps/mobile/src/HubScreen.tsx`
@@ -503,6 +510,7 @@ Turn every remaining vertical into tools plus a SKILL.md, dissolve the orchestra
   - `apps/mobile/src/ProfileScreen.tsx`
   - `apps/mobile/src/BriefPlayer.tsx`
   - `apps/mobile/src/ActivitySheet.tsx`
+  - `apps/api/superapp/routers/memory.py`
 - **[M] [adapt from V1]** P3.8 Retire POST /v1/agents/{name}/think, the AgentSpec think registry and SCREEN_AGENTS; keep render builders; routers/screen.py serves pure GETs only _(after P3.1, P3.3, P3.4)_
   - `apps/api/superapp/agents/base.py`
   - `apps/api/superapp/routers/screen.py`
@@ -526,6 +534,7 @@ Bring retrieval up to the merged spec on the embedding model you chose, add the 
   - `apps/api/superapp/tools/memory_tools.py`
   - `apps/api/superapp/routers/inbox.py`
   - `apps/api/alembic/versions/0031_home_chunks.py`
+  - `apps/api/scripts/check_release_postgres.py`
 - **[M] [port from V2]** P4.2 files.* namespace jailed to data/homes/<user_id>/workspace; exec tool registered only for the subagent role with a minimal env allowlist (PATH, HOME=workspace, LANG, TZ), jailed workdir, tier 1 with user provenance; test asserts no secret in the subprocess environment _(after P3.5, P1.3)_
   - `apps/api/superapp/tools/files_tools.py`
   - `apps/api/superapp/tools/exec_tools.py`
@@ -538,6 +547,7 @@ Bring retrieval up to the merged spec on the embedding model you chose, add the 
   - `apps/api/superapp/tools/credential_tools.py`
   - `apps/api/superapp/routers/credentials.py`
   - `apps/api/superapp/vault.py`
+  - `apps/mobile/src/cards/BrowserCard.tsx`
 - **[S] [adapt from V1]** P4.4 Deploy hygiene: Dockerfile entrypoint runs alembic upgrade head then uvicorn with one worker; create_all only under tests; DEPLOY.md crontab section replaced by the scheduler; compose stack describes one process plus Postgres behind Caddy; per-turn cost summary Activity event _(after P2.1)_
   - `apps/api/Dockerfile`
   - `apps/api/superapp/main.py`
@@ -563,6 +573,7 @@ Remove every module the new spine made redundant, drop the tables nothing reads,
   - `apps/api/superapp/dispatcher.py`
   - `apps/api/superapp/routers/tasks.py`
   - `apps/api/superapp/routers/kernel.py`
+  - `apps/api/superapp/kernel.py`
 - **[S] [new]** P5.2 Alembic 0032 drops flight_watches, campaigns, agent_tasks, interview_sessions, interview_turns, grocery_links (and autonomy_grants only if the user chose always-ask); models.py trimmed to match; docstrings promising gates that no longer exist removed _(after P5.1)_
   - `apps/api/alembic/versions/0032_drop_unused.py`
   - `apps/api/superapp/models.py`
@@ -585,7 +596,6 @@ Remove every module the new spine made redundant, drop the tables nothing reads,
 - **[V1] Display-only autonomy ladder UI paths (kernel promote/demote as endpoints), unless the user chooses always-ask, in which case the whole ladder and autonomy_grants** — current_level was consulted by nothing outside kernel.py; the ledger is kept and consulted by authorize(); promotion becomes a manual tap.
 - **[V1] GET /inbox/state send side effect, InterviewScreen full-screen route, ScoutCard, FlightsScreen, scout Playwright worker with shared profile and server-wide login link, GroceryLink preference, widget bridge, Outlook stub, six mobile polling loops** — Dead, unsafe or replaced: WS invalidations replace polling, the interview runs as a skill in the thread, the per-user browser worker replaces scout, and flight research becomes cards in the main thread plus a Hub timeline row (the one screen fold, argued in row 19).
 - **[V1] Bulk embedding of every synced Gmail body (import_source of whole mailboxes)** — Cost without a reader and the source of the migration-0027 degraded-recall reset; mail is searched live through inbox.search and only memorable items are indexed.
-- **[V2] The 308 ported Muse prompt blocks and scripts/port_blocks.py** — Vendor-branded, noisy, 193 unreachable, reference nonexistent tools, recovered from a stripped binary; replaced by ~25 blocks we write in the same manifest structure, enforced by a prompt-honesty test.
 - **[V2] 55 Muse skill directories, config/skills.yaml, /opt/hatch connector CLIs (hatch_gws_cli, health-cli)** — Two real CLIs; the rest reference absent binaries; connectors run in-process against V1's vault so no subprocess ever holds a key.
 - **[V2] Captured tool schemas (captured_68.json, core_reconstructed.json), the 46 handler-less functions, deferred namespaces, artifact/feed/wallet/channel/chat/todo/process namespaces** — Never pretend: schemas are generated from registered handlers only, and about 40 real tools need no deferral.
 - **[V2] db/schema.sql 194-table Muse schema, per-user Postgres, migrate_cell.py** — 14 tables used; V1's alembic chain plus five new tables covers the runtime.
@@ -595,3 +605,4 @@ Remove every module the new spine made redundant, drop the tables nothing reads,
 - **[V2] Client-side compaction, the 500-entry in-memory event ring, process-global SPAWNS/POOL/SESSIONS** — Server-side compaction with persisted compaction blocks, persisted agent_messages, and per-Room registries with ownership replace them.
 - **[V2] AGENTS.md, TOOLS.md, groups index and bank files; Markdown job files and bash hooks** — No V2 role ever wrote them; six standing files and rows-only jobs carry what Muse actually uses for one person.
 - **[V2] Ideas, Goals, Library JSON-file tabs, feed.json, side chats, attachments, event_hook role, button-text sensitivity regex** — Placeholders, unwired or unsafe; goals can return later as a real table in the Hub, ideas as scheduler-delivered cards, and the browser gate classifies by field type and URL instead.
+- **[V2] The 308 ported blocks as-is, scripts/port_blocks.py, the 34 source blocks damaged in extraction, and the ~20 builder-role folders** — The archive confirms the damage is at the source and no assembly recipe was ever captured. The undamaged blocks survive as wording we borrow; the behaviour comes from the replication kit's clean 102-line spec.
