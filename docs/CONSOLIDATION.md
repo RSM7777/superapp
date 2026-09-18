@@ -14,11 +14,12 @@ Nano becomes one agent you talk to, built in Muse's shape and running inside the
 
 _Blocks phase 1._
 
-1. A) Anthropic Claude through V1's provider: Opus 5 for chat with adaptive thinking, Sonnet 5 for subagents, Haiku 4.5 for triage and memory flush; keeps structured JSON output, prompt caching, batch pricing, server-side refusal fallbacks and cost metering; the loop is ported to Claude's tool-use streaming.
-2. B) Meta muse-spark via its OpenAI-compatible endpoint (https://api.meta.ai/v1, META_API_KEY): closest to the Muse you used, but we build a second backend and replace four server-side guarantees (JSON-schema output, cache breakpoints, batches, refusal fallback) with client-side validation and retries, and cost tracking depends on the endpoint reporting usage.
-3. C) Both behind one switch (about 400 extra lines) so you can A/B the same conversation and decide after a week of real use.
+1. A) Anthropic Claude through V1's provider: Opus 5 for chat with adaptive thinking, Sonnet 5 for helpers, Haiku 4.5 for triage and memory flush; keeps structured JSON output, prompt caching, batch pricing, refusal fallbacks and cost metering; the loop is ported to Claude's tool-use streaming. Your data goes to Anthropic.
+2. B) Meta muse-spark via its OpenAI-compatible endpoint: closest to the Muse you used; we build a second backend and replace four server-side guarantees with client-side validation and retries. Your data goes to Meta, which is what you are leaving.
+3. C) Qwen3.8-27B, open weights (Apache 2.0, 262k context, strong on agent benchmarks), through the same second backend: HOSTED (Alibaba, Together, Fireworks, OpenRouter): fast and cheaper than Claude, but your data goes to that host, the same privacy shape as A. LOCAL on your M1 Pro 32GB via Ollama: nothing leaves your machines, but about 6-10 words a second and minutes per chat turn, and the Mac must stay on. The Hostinger VM has no GPU, so local Qwen cannot run there at chat speed.
+4. D) Hybrid (recommended): Claude for the conversation and drafting, where judgment and speed matter and every V1 test already runs; Qwen3.8 for the background jobs that touch the most raw data (triage classification, memory-flush extraction, learnings proposals, receipt reading), local on the Mac if it stays on, else hosted. The per-role routing already in the plan makes this a config choice; the second backend is the same ~400 lines as B or C.
 
-**Recommendation:** A. The safety gate does not depend on the model, but the metering, caching and the schema-constrained triage/draft steps do, and every V1 test already runs on this path. Since we are replacing Muse's prompts anyway, the behaviour you liked will need prompt iteration on either model; if after a week the feel is wrong, B is a bounded addition behind the same seam.
+**Recommendation:** D, with A alone as the simplest start. The chat brain needs speed and judgment; a 27B model on an M1 Pro gives neither at chat speed, and a hosted one has the same privacy shape as Claude. But the background jobs are where most of your raw mail passes through, they are not latency-sensitive, and a local model there means the bulk of your inbox is never sent anywhere. Start on A so phase 1 runs on tested code; add the second backend when phase 2's inbox job lands and route it to Qwen then. If the feel is wrong on Claude, C-hosted is a bounded switch behind the same door.
 
 ### Should Nano earn autonomy over time, or always ask like Muse?
 
@@ -39,7 +40,7 @@ _Blocks phase 4._
 
 **Recommendation:** A for a personal project: no key to manage, no network dependency for memory, and the store, provenance and scoping are what matter; swapping later is one function plus one migration.
 
-## All 41 decisions
+## All 42 decisions
 
 ### 1. Core loop · phase 1 · large
 
@@ -444,6 +445,16 @@ _Blocks phase 4._
 **Replaces:** Nothing. V1's .gitignore mentions a backups/ folder that nothing writes to.
 
 **Why:** Your whole life ends up in one Postgres and one folder. On Meta's side that is Meta's problem; here it is yours, and the day you need a backup is the wrong day to find out it was empty.
+
+### 42. Where it lives · phase 4 · small
+
+**Do:** Decided: a Hostinger VPS you own runs Postgres with pgvector, the API with the scheduler inside it, and Caddy for HTTPS, from the docker-compose already in the repo (minus the scout service the plan deletes). Your Mac can optionally host a local model for background jobs. Your phone reaches the VM over your own domain.
+
+**Replaces:** Harshith's EC2 at app.nutrishiksha.com (the app currently points there) and V2's per-user Fly cells.
+
+**Why:** It is your box, so it is your data. One process plus Postgres is the smallest thing that works for one person, and the compose file that builds it already exists: pgvector/pgvector:pg16, the API, Caddy. Muse uses the same database (Postgres with pgvector, a vector(384) column) inside a systemd-nspawn container Meta orchestrates; for one VPS docker-compose is the right wrapper for the same thing.
+
+**Beats Muse:** Muse runs you inside Meta's container on Meta's machines. This runs on yours, and a backup of it is yours too.
 
 ## Six build phases
 
