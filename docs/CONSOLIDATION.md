@@ -39,7 +39,7 @@ _Blocks phase 4._
 
 **Recommendation:** A for a personal project: no key to manage, no network dependency for memory, and the store, provenance and scoping are what matter; swapping later is one function plus one migration.
 
-## All 35 decisions
+## All 36 decisions
 
 ### 1. Core loop · phase 1 · large
 
@@ -263,15 +263,15 @@ _Blocks phase 4._
 
 **Beats Muse:** An adaptive interview that produces durable, provenance-stamped identity beliefs, offered as a card, not required.
 
-### 23. Retrieval: stop indexing Gmail · phase 4 · medium
+### 23. Retrieval: what gets indexed, and how it ranks · phase 4 · medium
 
-**Do:** Stop embedding every synced email; search mail live through inbox.search the way Muse does, and index only what is memorable: your memory files (with file#line citations), notes you import, sent replies, and threads that were flagged needs-reply or worth-knowing.
+**Do:** Stop embedding every synced email; search mail live like Muse does, and index only what is memorable: your memory notes (with file#line citations), notes you import, sent replies, and threads that mattered. Rank the way Muse does: how well it matches, boosted by the importance tagged when the memory was written and by how recently it was last confirmed (90-day half-life), reranked by a cross-encoder, with a score floor so weak matches never surface, and the search tries one to three phrasings of your question.
 
-**Replaces:** V1's habit of chunking every synced message (the source of the migration-0027 degraded-recall reset); V2's embedded Qdrant with a cross-user singleton.
+**Replaces:** V1's habit of chunking every synced message (the source of the migration-0027 degraded-recall reset) and its ranking by match alone (event_at stored, never used); V2's embedded Qdrant with a cross-user singleton.
 
-**Why:** Ninety-five percent of mail is never asked about and thread context already lives in the inbox table; indexing it is cost without a reader. V1's store keeps provenance, scoping in SQL and the honest 'degraded' flag that blocks autonomous action, plus V2's two good ideas (rerank, line citations) lift cleanly on top.
+**Why:** Ninety-five percent of mail is never asked about and thread context already lives in the inbox table. The ranking is Muse's, confirmed two ways: its config in the archive (match 0.7 / keywords 0.3, importance prior 0.15, recency prior 0.1 with a 90-day half-life, rerank top 20) and Muse's own description of the behaviour (importance is tagged at write time, a September 9 correction outranks the September 8 version, a score floor, several phrasings per search). V1's store keeps the provenance, SQL scoping and honest degraded flag underneath.
 
-**Beats Muse:** Every recalled line says who said it, where and when, and a degraded index automatically lowers autonomy instead of pretending.
+**Beats Muse:** Every recalled line says who said it, where and when; a degraded index automatically lowers autonomy instead of pretending; and memory.explain shows the full receipt for any hit, which Muse only has for some memories.
 
 ### 24. Retrieval: embedding model · phase 4 · small — **you decide**
 
@@ -388,6 +388,16 @@ _Blocks phase 4._
 **Why:** This is the real content of Muse's self_improvement schema: objectives, runs with leases and recovery, calculation and calibration cards, follow-up attempts with a selector, handoff dedupe. It is the proactive layer Meta advertises and the biggest thing Muse does that we do not. The tables give us the shape; the logic lives in Meta's binary, so we design it ourselves. It is a phase of its own and needs a proper design pass before a line is written.
 
 **Beats Muse:** Every card shows the inputs and the formula it was computed from (Muse stores them in calculation_records; we would surface them), and every follow-up passes the same authorize() gate and daily cost cap as everything else, so proactivity cannot become spam.
+
+### 36. Memory claims with a receipt · phase 3 · medium
+
+**Do:** Behind the notes, Nano keeps structured claims: what was said, the exact quote, who said it, when it was first learned, when it was last confirmed, its current confidence, and what it replaced. When Nano writes a memory it tags it inline with its kind and importance ([preference|medium]), and a memory.explain tool shows the whole receipt for any search hit. Not every line becomes a claim; only what the memory flush extracts.
+
+**Replaces:** V1's user_facts (confidence plus a supersession event, nothing else); V2's untagged Markdown lines.
+
+**Why:** Muse's memory.claims table (kind, salience, quote, speaker, evidence, supersedes, confidence, first_seen, reinforced_at, valid_until) matches what Muse itself described: importance decided by the writer at write time, recency by last confirmation, and an explain view of the anatomy. Reinforcement is the piece we lacked: a fact you have confirmed twice should rank fresher than one you said once. The extraction lives in the memory flush we already planned.
+
+**Beats Muse:** The receipt is shown to you, and correcting a claim archives the old one with its quote instead of overwriting it.
 
 ## Six build phases
 
@@ -586,6 +596,11 @@ Turn every remaining vertical into tools plus a SKILL.md, dissolve the orchestra
 - **[S] [adapt from V1]** P3.12 Relationship briefs: people.brief(email) builds a short brief from the Person row, mail_history sender/thread history and open drafts; rendered as a card before a reply and on the person's row in the Me tab _(after P3.1)_
   - `apps/api/superapp/people.py`
   - `apps/api/superapp/tools/people_tools.py`
+- **[M] [new]** P3.13 Claims layer: memory_claims table (claim_id, kind, salience low/medium/high, claim_text, quote, speaker, evidence_handles, supersedes_claim_id, status, confidence, first_seen, reinforced_at, valid_until); the memory flush extracts claims from recent turns with a schema-constrained call and reinforces an existing claim instead of duplicating it; memory.write stamps [kind|salience] inline on the line it writes; memory.explain(hit) returns the claim anatomy; supersession archives the old claim _(after P3.3, P1.5)_
+  - `apps/api/superapp/memory/claims.py`
+  - `apps/api/superapp/tools/memory_tools.py`
+  - `apps/api/superapp/scheduler/jobs.py`
+  - `apps/api/alembic/versions/0032_memory_claims.py`
 
 ### Phase 4: Depth: retrieval, hands, deploy
 
@@ -593,7 +608,7 @@ Bring retrieval up to the merged spec on the embedding model you chose, add the 
 
 **Done when:** pytest green plus scripts/check_release_postgres.py; memory.search returns citations from notes, curated files and selected mail with provenance, and passes with no embedding key set; a subagent can run a script in the workspace with no secret in its environment; a browser errand pauses on a payment field for a tier-3 card and a site login shows a credential card; the container boots with migrations applied, one worker and no crontab.
 
-- **[M] [adapt from V1]** P4.1 Retrieval: index the home-directory Markdown into memory_chunks (kind=home, ref=path, line span) so memory.search returns path#Lnn citations; selective mail indexing (needs_reply/worth_knowing, sent replies with author and source_ref, drafted threads, imported knowledge) and no bulk import of raw bodies; fix thread-id keying; per-source degraded flag; optional cross-encoder rerank stage behind a flag; embedder per the user's decision (Alembic 0031 changes the vector width and re-embeds if local); check_release_postgres.py extended _(after P1.5, P2.3)_
+- **[M] [adapt from V1]** P4.1 Retrieval: index the home-directory Markdown into memory_chunks (kind=home, ref=path, line span) so memory.search returns path#Lnn citations; selective mail indexing (needs_reply/worth_knowing, sent replies with author and source_ref, drafted threads, imported knowledge) and no bulk import of raw bodies; fix thread-id keying; per-source degraded flag; optional cross-encoder rerank stage behind a flag; embedder per the user's decision (Alembic 0031 changes the vector width and re-embeds if local); check_release_postgres.py extended; ranking = fused match score + salience prior (0.15, from the inline [kind|salience] tag) + recency prior (0.1, 90-day half-life over reinforced_at, not created_at) + cross-encoder rerank of the top 20; a min_score floor; the search tool accepts one to three phrasings and unions them; all weights in config, defaults from Muse's home.yaml _(after P1.5, P2.3)_
   - `apps/api/superapp/memory.py`
   - `apps/api/superapp/memory/embed.py`
   - `apps/api/superapp/memory/rerank.py`
