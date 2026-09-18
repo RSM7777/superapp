@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     gmail_pubsub_topic: str = ""
 
     # Default IANA timezone for greetings/schedules until per-user tz facts exist.
-    default_timezone: str = "America/Chicago"
+    default_timezone: str = "America/Los_Angeles"
 
     # The scout worker authenticates with this to pull/complete tasks.
     worker_token: str = ""
