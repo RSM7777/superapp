@@ -375,14 +375,14 @@ Land the general loop, the tool registry with authorize() and persisted approval
   - `apps/api/superapp/tools/memory_tools.py`
   - `apps/api/superapp/substrate/facts.py`
   - `V2/superapp/memory/files.py`
-- **[M] [new]** P1.6 Prompts: port roles.yaml and assembler.py; build ~25 blocks for chat, subagent, scheduler_worker and memory_flush by adapting Muse's material (friend_replication_kit/agent_spec.md and soul.md as the behavioural source of truth; wording borrowed from the undamaged aria blocks in chat/, shared/, memory_flush/, scheduler_worker/, browser_task/; the 13 Muse/Meta mentions renamed; the 25 muse.* tool names mapped to ours or the block dropped; the 34 damaged files and the builder-role folders excluded); assemble once per turn under the provider's cache_control breakpoint; clock as a mid-conversation system message on Opus 5 (trailing block at hour granularity on Sonnet 5); prompt-honesty test that every tool, file and skill named exists _(after P1.3, P1.5)_
+- **[M] [new]** P1.6 Prompts: port roles.yaml and assembler.py; build ~25 blocks for chat, subagent, scheduler_worker and memory_flush by adapting Muse's material (friend_replication_kit/agent_spec.md and soul.md as the behavioural source of truth; wording borrowed from the undamaged aria blocks in chat/, shared/, memory_flush/, scheduler_worker/, browser_task/; the 13 Muse/Meta mentions renamed; the 25 muse.* tool names mapped to ours or the block dropped; the 34 damaged files and the builder-role folders excluded); assemble once per turn under the provider's cache_control breakpoint; clock as a mid-conversation system message on Opus 5 (trailing block at hour granularity on Sonnet 5); prompt-honesty test that every tool, file and skill named exists; the chat role's block ORDER follows docs/muse-chat-assembly-order.md (Muse's own statement of it), not V2's reconstructed roles.yaml _(after P1.3, P1.5)_
+  - `docs/muse-chat-assembly-order.md`
   - `apps/api/superapp/prompts/roles.yaml`
   - `apps/api/superapp/prompts/assembler.py`
   - `apps/api/superapp/prompts/blocks/`
   - `apps/api/tests/test_prompts.py`
   - `musearch/friend_replication_kit/agent_spec.md`
   - `musearch/friend_replication_kit/soul.md`
-  - `aria/prompt-blocks/blocks/`
 - **[M] [port from V2]** P1.7 Chat transport: WS /v1/chat with V2's frame protocol (turn_start/text_delta/event/turn_end/approval/approval_resolved) plus message ids, paginated GET /v1/history and a 'screen' frame carrying a validated V1 Screen/Section JSON card; screen.emit tool; cost.summary tool over llm_call events _(after P1.2, P1.4)_
   - `apps/api/superapp/routers/chat.py`
   - `apps/api/superapp/tools/screen_tools.py`
