@@ -39,7 +39,7 @@ _Blocks phase 4._
 
 **Recommendation:** A for a personal project: no key to manage, no network dependency for memory, and the store, provenance and scoping are what matter; swapping later is one function plus one migration.
 
-## All 36 decisions
+## All 41 decisions
 
 ### 1. Core loop · phase 1 · large
 
@@ -399,6 +399,52 @@ _Blocks phase 4._
 
 **Beats Muse:** Four things. Supersession is always structured: a correction must resolve the claim it replaces by id, and if none exists the old understanding is created as an inferred claim, so the chain is never dangling and memory.explain can always show what changed; Muse's is sometimes prose and then unqueryable. Explicit corrections and preferences become claims at the end of the turn they were said in, not at the next hourly run; Muse's are invisible to explain until the batch job passes. Where a claim came from is load-bearing: a claim from your own words can drive an autonomous action, one the assistant inferred or read in an email or document cannot without the same gate as the content it came from, and we say 'sourced' and 'confirmed' instead of 'verified' because nothing was fact-checked. And a raw line that keeps getting retrieved is promoted to a claim, instead of staying unexplainable forever.
 
+### 37. Pause switch · phase 1 · small
+
+**Do:** One switch pauses everything: the scheduler stops picking up runs, every pending approval is held, no background turn starts, and a banner says so; the chat still answers so you can ask what is going on. It is a row in the database, so it survives a restart and works from a phone tap.
+
+**Replaces:** Nothing. Neither codebase has a way to stop everything at once.
+
+**Why:** Muse's own operating spec names stop, pause and audit as safeguards the agent must never bypass. Before you hand an agent your inbox and your calendar, you want the off switch to exist and to have been tested.
+
+**Beats Muse:** Ours is a persisted state every job and every approval checks, not a prompt instruction.
+
+### 38. Seed memory from Muse · phase 1 · small
+
+**Do:** On day one, import the memory Muse has already built about you: ask Muse to export ~/MEMORY.md, ~/memory/*.md, USER.md and IDENTITY.md, and Nano starts knowing you instead of starting blank. The inline [kind|salience] claim format is the one we adopted, so the claims and their quotes come across, tagged as source 'muse-import' so their provenance is honest.
+
+**Replaces:** Nothing. Starting blank.
+
+**Why:** More than a week of curated memory about you already exists and Muse hands its files over when asked. Throwing that away means re-teaching Nano everything Muse learned.
+
+**Beats Muse:** Every imported claim keeps its origin, so a Muse-era fact can be corrected or retired like any other.
+
+### 39. Time is yours, not the server's · phase 1 · small
+
+**Do:** Time is per user, taken from the phone: 'today', the daily log's date, memory decay, the morning brief and every scheduled job use your zone.
+
+**Replaces:** V1's America/Chicago default in config and the twins that compute 'today' in UTC; V2's file-mtime recency.
+
+**Why:** You are in Redmond. V1 defaults to Chicago, its meal and inbox views compute today in UTC, and Muse's daily logs are dated by file time: three different clocks. A wrong 'today' quietly breaks the daily log, the morning brief and every countdown.
+
+### 40. Your labelled mail as the acceptance test · phase 2 · small
+
+**Do:** Before you use the inbox daily, 40 to 60 real emails that you label yourself (needs reply / worth knowing / receipt / clear, plus importance) become the test triage must pass, and it runs in CI on every change.
+
+**Replaces:** The earlier eval conversation, which never produced a set.
+
+**Why:** It is the one measurement that says triage is safe on your mail rather than on a stub mailbox, and only you can produce the labels. Muse ships eval scenarios with its skills; ours is your inbox.
+
+**Beats Muse:** Ours is graded on your real mail, not on scenarios written by the vendor.
+
+### 41. Backups · phase 4 · small
+
+**Do:** Every night the database and each home folder are copied to a place you choose (a second disk, a bucket, a folder Time Machine sees), and once a week a job restores the copy into a scratch database and reads a claim back, so the backup is known to work before the day you need it.
+
+**Replaces:** Nothing. V1's .gitignore mentions a backups/ folder that nothing writes to.
+
+**Why:** Your whole life ends up in one Postgres and one folder. On Meta's side that is Meta's problem; here it is yours, and the day you need a backup is the wrong day to find out it was empty.
+
 ## Six build phases
 
 ### Phase 1: Spine: one agent you can talk to
@@ -468,6 +514,18 @@ Land the general loop, the tool registry with authorize() and persisted approval
   - `apps/api/tests/test_authorize.py`
   - `apps/api/tests/test_approvals.py`
   - `apps/api/tests/test_memory_home.py`
+- **[S] [new]** P1.11 Pause switch: runtime_state row (paused, paused_at, reason) checked by the scheduler before claiming a run, by approvals before auto-resolving, and by the loop before any background turn; runtime.pause/resume tools (user provenance only); POST /v1/runtime/pause; a banner frame over the socket; test that a paused system claims no run and sends nothing _(after P1.4)_
+  - `apps/api/superapp/runtime.py`
+  - `apps/api/superapp/routers/chat.py`
+  - `apps/api/tests/test_pause.py`
+- **[S] [new]** P1.12 Seed import: scripts/import_muse_home.py reads an exported Muse home (MEMORY.md, memory/*.md, USER.md, IDENTITY.md), copies the standing files through memory.write, parses inline [kind|salience] claim lines into memory_claims with source_kind=muse-import and their quotes and dates, and indexes them; idempotent per claim id _(after P1.5)_
+  - `apps/api/scripts/import_muse_home.py`
+  - `apps/api/superapp/memory/claims.py`
+- **[S] [adapt from V1]** P1.13 Per-user timezone: users.timezone set from the phone on sign-in and on change; every 'today' (nutrition, inbox views, daily log path, decay, morning brief, scheduler cron evaluation) reads it; config default becomes a fallback only; test that a meal logged at 11pm Pacific lands on the right day _(after P1.5)_
+  - `apps/api/superapp/config.py`
+  - `apps/api/superapp/substrate/nutrition.py`
+  - `apps/api/superapp/substrate/inbox.py`
+  - `apps/api/superapp/memory/home.py`
 
 ### Phase 2: Inbox becomes a skill; consent and background work go durable
 
@@ -524,6 +582,9 @@ Port the scheduler, move the auto-send window onto persisted approvals with a de
   - `apps/api/superapp/inbox/factory.py`
   - `apps/api/superapp/grocery/factory.py`
   - `apps/api/alembic/versions/0030_connector_reads.py`
+- **[S] [new]** P2.9 Acceptance set: apps/api/golden/inbox/ with 40-60 of the user's own emails (bodies redacted of secrets, envelopes kept) labelled tier + importance + requires_reply; test_inbox_golden.py runs triage over them in stub-free mode when a key is present and reports precision per tier; CI gate on 'no important mail cleared' _(after P2.3)_
+  - `apps/api/golden/inbox/`
+  - `apps/api/tests/test_inbox_golden.py`
 
 ### Phase 3: Everything is a skill; the app is thread-first
 
@@ -629,7 +690,7 @@ Bring retrieval up to the merged spec on the embedding model you chose, add the 
   - `apps/api/superapp/routers/credentials.py`
   - `apps/api/superapp/vault.py`
   - `apps/mobile/src/cards/BrowserCard.tsx`
-- **[S] [adapt from V1]** P4.4 Deploy hygiene: Dockerfile entrypoint runs alembic upgrade head then uvicorn with one worker; create_all only under tests; DEPLOY.md crontab section replaced by the scheduler; compose stack describes one process plus Postgres behind Caddy; per-turn cost summary Activity event _(after P2.1)_
+- **[S] [adapt from V1]** P4.4 Deploy hygiene: Dockerfile entrypoint runs alembic upgrade head then uvicorn with one worker; create_all only under tests; DEPLOY.md crontab section replaced by the scheduler; compose stack describes one process plus Postgres behind Caddy; per-turn cost summary Activity event; nightly backup job (pg_dump plus rsync of data/homes/ to a configured destination) and a weekly restore-check job that restores into a scratch database and reads one claim back, both on the scheduler and both visible in the Activity sheet _(after P2.1)_
   - `apps/api/Dockerfile`
   - `apps/api/superapp/main.py`
   - `deploy/DEPLOY.md`
