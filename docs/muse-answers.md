@@ -109,3 +109,38 @@ scheduled job, so retirement is scheduled rather than hoped for; a learning
 that governs an action is a standing rule needing your yes and can never
 raise what authorize() allows; all learnings are in one place with origin
 and outcome, revocable in a tap.
+
+## The export itself (received 2026-09-17): SOUL.md, MEMORY.md; USER.md and IDENTITY.md reported blank
+
+**What arrived:** SOUL.md is the shipped template plus the user's own "lion
+standard" section (grounded, courageous, know when to speak, set the
+standard). MEMORY.md has three sections (Facts, Preferences, Commitments),
+16 entries, each ending in a provenance sentence ("This came from X when the
+user asked for Y, recorded DATE"). No inline [kind|salience] tags: those
+live in the daily-log claim records, not the curated file. IDENTITY.md has
+only a name (Aria). USER.md is blank in every field, timezone included.
+
+**Muse's own observation:** "USER.md is empty despite a week of working
+together ... the memory system bypassed them. If the memory store ever got
+wiped, these files wouldn't reconstruct who you are."
+
+**What the file shows about the flush in practice:** several entries are
+hundreds of words of dated progress (a profile sweep holding at 368 of
+1,515 with 13 named IDs; open option positions with credits and modelled
+max losses) in a file whose own header says to keep it tight and leave
+day-to-day detail in the daily notes. One "commitment" ("Gmail is searched
+live at query time...") is a statement about the system, not about the
+user. Nothing is marked private, and the whole file is injected into every
+turn.
+
+**Taken into the plan:** SOUL.md as is; the three-section structure; the
+per-entry provenance habit, compacted to a tag; the entries as seed, through
+a classifier rather than a copy (rows 6, 39; P1.5, P1.12).
+
+**Where we do better:** USER.md is maintained as a projection of the most
+durable claims and cannot go blank; each entry carries a privacy class and
+private entries never reach helpers, workers or a background model; shape
+rules (length, kind, state-vs-fact) are enforced by the flush so "keep it
+tight" is a test; provenance is a compact tag instead of a twenty-word
+sentence. Still needed from the export: the daily logs (memory/*.md), where
+the structured claims with quotes and supersedes links are.

@@ -96,13 +96,13 @@ _Blocks phase 4._
 
 ### 6. Memory · phase 1 · medium
 
-**Do:** Give each user a folder of seven plain Markdown files the agent reads every turn and keeps current: SOUL, IDENTITY, USER, MEMORY, AGENTS (its operating manual: the learnings it has adopted, rendered from the learnings table and editable back into it), people pages, and a daily log. Records (mail, meals, purchases, transactions) stay in the existing Postgres tables. The agent can only change the files through one memory.write tool that validates, refuses secrets, caps size and archives the previous version.
+**Do:** Give each user a folder of seven plain Markdown files the agent reads every turn and keeps current: SOUL, IDENTITY, USER, MEMORY, AGENTS (its operating manual: the learnings it has adopted, rendered from the learnings table and editable back into it), people pages, and a daily log. Records (mail, meals, purchases, transactions) stay in the existing Postgres tables. The agent can only change the files through one memory.write tool that validates, refuses secrets, caps size and archives the previous version. USER.md is never allowed to go blank: the memory flush maintains it as a projection of the most durable claims about you (name, how to address you, timezone, the ten facts and preferences that matter most), so a wiped MEMORY.md still leaves a profile. Every curated entry carries a compact provenance tag and a privacy class, and private entries are injected only for your own chat, never for helpers, scheduled workers or a background model.
 
 **Replaces:** V2's eight standing files plus four bank files edited with generic file tools and no guard; V1's opaque JSON facts that no prompt ever read (to_prompt_dict has zero callers). TOOLS.md is not carried: Muse uses it for local setup notes, which the skills catalog and connector status cover.
 
-**Why:** Self-maintained files you can open are what make Muse feel like it knows you, and V1 has no equivalent. V1's write_fact already has the validator, secret guard and supersession archive V2 lacks, so the tool wraps it. AGENTS.md was wrongly dropped in the first draft because V2's port never wrote it; Muse has since confirmed twice that it is the file where learnings live ('a mistake not to repeat'), so it is back, as the readable face of the learnings table.
+**Why:** Self-maintained files you can open are what make Muse feel like it knows you, and V1 has no equivalent. V1's write_fact already has the validator, secret guard and supersession archive V2 lacks, so the tool wraps it. AGENTS.md was wrongly dropped in the first draft because V2's port never wrote it; Muse has since confirmed twice that it is the file where learnings live ('a mistake not to repeat'), so it is back, as the readable face of the learnings table. Muse's own export proved the gap: after a week, its USER.md and IDENTITY.md were blank and everything it knew lived in MEMORY.md and the daily logs; Muse said so itself. Its MEMORY.md also breaks its own 'keep it tight' rule, with several entries over 100 words carrying dated progress that belongs in a daily log, and every entry rides into every turn with no privacy marking.
 
-**Beats Muse:** Every memory edit leaves an archived previous version with who wrote it and when, secrets are refused at the door, and a Memory page in the app lets you read and correct the same files.
+**Beats Muse:** Every memory edit leaves an archived previous version with who wrote it and when, secrets are refused at the door, and a Memory page lets you read and correct the same files. And three things Muse's export showed it lacks: a profile file that cannot go blank, a privacy class per entry so personal detail never rides along into a helper's or a background model's prompt, and shape rules the flush enforces so 'keep it tight' is a test rather than a comment.
 
 ### 7. Context assembly · phase 1 · medium
 
@@ -422,11 +422,13 @@ _Blocks phase 4._
 
 ### 39. Time is yours, not the server's · phase 1 · small
 
-**Do:** Time is per user, taken from the phone: 'today', the daily log's date, memory decay, the morning brief and every scheduled job use your zone.
+**Do:** On day one, import the memory Muse already built about you. The export is in hand: SOUL.md (the template plus your own 'lion standard'), MEMORY.md (16 entries under Facts, Preferences, Commitments, each with a provenance sentence), and the daily logs still to come, which is where the structured claims with quotes and supersedes links live. The importer keeps SOUL.md as is, routes each MEMORY.md entry through the flush's classifier so durable facts land in the curated file, dated progress lands in the daily log or an objective, and a system statement filed as a commitment is dropped, and tags everything source 'muse-import'.
 
 **Replaces:** V1's America/Chicago default in config and the twins that compute 'today' in UTC; V2's file-mtime recency.
 
-**Why:** You are in Redmond. V1 defaults to Chicago, its meal and inbox views compute today in UTC, and Muse's daily logs are dated by file time: three different clocks. A wrong 'today' quietly breaks the daily log, the morning brief and every countdown.
+**Why:** More than a week of curated memory exists and Muse hands its files over when asked. But the export also showed why the import must classify rather than copy: several entries are hundreds of words of dated progress (a profile sweep holding at 368 of 1,515; open option positions with credits and max losses) that will be stale within days, one 'commitment' is a fact about the system rather than about you, and nothing is marked private.
+
+**Beats Muse:** Every imported claim keeps its origin, so a Muse-era fact can be corrected or retired like any other, and the import is the first run of the same shape rules the flush enforces forever after.
 
 ### 40. Your labelled mail as the acceptance test · phase 2 · small
 
@@ -487,7 +489,7 @@ Land the general loop, the tool registry with authorize() and persisted approval
   - `apps/api/superapp/routers/approvals.py`
   - `apps/api/superapp/push.py`
   - `apps/api/superapp/auth_sessions.py`
-- **[M] [port from V2]** P1.5 Home-directory memory: seven standing files per user under data/homes/<user_id>/ (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, AGENTS.md rendered from the learnings table, memory/people/, memory/YYYY-MM-DD.md) with a token cap on injection; memory.write / memory.edit / memory.remember_fact / memory.facts / memory.search(FTS-only for now) tools wrapping write_fact's validator, the SECRET_HINT guard, the size cap and a memory_superseded archive event; a one-line computed state header appended after the files _(after P1.3)_
+- **[M] [port from V2]** P1.5 Home-directory memory: seven standing files per user under data/homes/<user_id>/ (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, AGENTS.md rendered from the learnings table, memory/people/, memory/YYYY-MM-DD.md) with a token cap on injection; memory.write / memory.edit / memory.remember_fact / memory.facts / memory.search(FTS-only for now) tools wrapping write_fact's validator, the SECRET_HINT guard, the size cap and a memory_superseded archive event; a one-line computed state header appended after the files; every curated entry carries a compact provenance tag ([fact|2026-09-10|gmail]) and a privacy class (public/personal/private) and injection filters by role: private entries reach only the root chat; shape rules enforced by memory.write and the flush (a curated entry is at most ~60 words; dated progress goes to the daily log or an objective; a kind mismatch is rejected with the reason); USER.md maintained as a projection of the top identity claims after every flush _(after P1.3)_
   - `apps/api/superapp/memory/home.py`
   - `apps/api/superapp/tools/memory_tools.py`
   - `apps/api/superapp/substrate/facts.py`
@@ -529,7 +531,7 @@ Land the general loop, the tool registry with authorize() and persisted approval
   - `apps/api/superapp/runtime.py`
   - `apps/api/superapp/routers/chat.py`
   - `apps/api/tests/test_pause.py`
-- **[S] [new]** P1.12 Seed import: scripts/import_muse_home.py reads an exported Muse home (MEMORY.md, memory/*.md, USER.md, IDENTITY.md), copies the standing files through memory.write, parses inline [kind|salience] claim lines into memory_claims with source_kind=muse-import and their quotes and dates, and indexes them; idempotent per claim id _(after P1.5)_
+- **[S] [new]** P1.12 Seed import: scripts/import_muse_home.py reads an exported Muse home (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, memory/*.md); SOUL.md and IDENTITY.md copied through memory.write; each MEMORY.md entry classified (kind, salience, privacy class; state-shaped entries routed to the daily log, system statements dropped) and written with a compact provenance tag; daily-log claim records ([kind|salience] claim:<id> quote supersedes sources) parsed into memory_claims with source_kind=muse-import and their supersedes links resolved; USER.md then projected from the top claims so it is not blank; idempotent per claim id; a report of what was kept, moved and dropped _(after P1.5)_
   - `apps/api/scripts/import_muse_home.py`
   - `apps/api/superapp/memory/claims.py`
 - **[S] [adapt from V1]** P1.13 Per-user timezone: users.timezone set from the phone on sign-in and on change; every 'today' (nutrition, inbox views, daily log path, decay, morning brief, scheduler cron evaluation) reads it; config default becomes a fallback only; test that a meal logged at 11pm Pacific lands on the right day _(after P1.5)_
